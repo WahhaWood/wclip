@@ -1,0 +1,61 @@
+[
+  {
+    "data": {
+      "video": {
+        "id": "100",
+        "comments": {
+          "edges": [
+            {
+              "cursor": "c1",
+              "node": {
+                "id": "m1",
+                "contentOffsetSeconds": 600,
+                "commenter": { "id": "1", "login": "alice", "displayName": "Alice" },
+                "message": {
+                  "fragments": [
+                    { "emote": null, "text": "hi " },
+                    { "emote": { "id": "x", "emoteID": "25", "from": 3 }, "text": "Kappa" },
+                    { "emote": null, "text": " look OMEGALUL there" }
+                  ],
+                  "userBadges": [
+                    { "id": "b1", "setID": "subscriber", "version": "12" },
+                    { "id": "b2", "setID": "premium", "version": "1" }
+                  ],
+                  "userColor": "#FF7F50"
+                }
+              }
+            },
+            {
+              "cursor": "c2",
+              "node": {
+                "id": "m2",
+                "contentOffsetSeconds": 601,
+                "commenter": { "id": "2", "login": "bob", "displayName": "bob" },
+                "message": {
+                  "fragments": [{ "emote": null, "text": "no color here" }],
+                  "userBadges": [],
+                  "userColor": null
+                }
+              }
+            },
+            {
+              "cursor": "c3",
+              "node": {
+                "id": "m3",
+                "contentOffsetSeconds": 602,
+                "commenter": null,
+                "message": {
+                  "fragments": [{ "emote": null, "text": "deleted account" }],
+                  "userBadges": [],
+                  "userColor": null
+                }
+              }
+            }
+          ],
+          "pageInfo": { "hasNextPage": true, "hasPreviousPage": true }
+        }
+      }
+    },
+    "extensions": { "durationMilliseconds": 50 }
+  }
+]

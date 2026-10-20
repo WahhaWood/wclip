@@ -1,4 +1,6 @@
+pub mod chat;
 pub mod cut;
+pub mod images;
 pub mod job;
 pub mod tools;
 pub mod twitch;
@@ -9,6 +11,11 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+/// FNV-1a: stable across runs and builds, unlike `DefaultHasher`.
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
+}
 
 #[derive(Default)]
 struct AppState {

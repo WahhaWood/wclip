@@ -2,14 +2,16 @@
 //!
 //! Paging by cursor fails Twitch's integrity check (checked 2026-10-20), paging by
 //! offset does not. So every page is requested by offset: the next request starts at
-//! the last comment's offset and duplicates are dropped by id.
+//! the last comment's offset and duplicates are dropped by id. A page starts several
+//! seconds before the requested offset (checked 2026-10-20), so pages overlap and no
+//! comment is lost between them. Offsets are whole seconds.
 
 use std::collections::HashSet;
 
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{CLIENT_ID, Error, GQL_URL, Result};
+use super::{CLIENT_ID, Error, GQL_URL, GqlError, Result};
 
 const COMMENTS_HASH: &str = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a";
 
@@ -71,11 +73,6 @@ struct Response {
 }
 
 #[derive(Deserialize)]
-struct GqlError {
-    message: String,
-}
-
-#[derive(Deserialize)]
 struct Data {
     video: Option<Video>,
 }
@@ -114,7 +111,7 @@ async fn fetch_page(client: &reqwest::Client, video_id: &str, offset: u32) -> Re
         "variables": { "videoID": video_id, "contentOffsetSeconds": offset },
         "extensions": { "persistedQuery": { "version": 1, "sha256Hash": COMMENTS_HASH } },
     }]);
-    let mut responses: Vec<Response> = client
+    let responses: Vec<Response> = client
         .post(GQL_URL)
         .header("Client-ID", CLIENT_ID)
         .json(&body)
@@ -123,6 +120,10 @@ async fn fetch_page(client: &reqwest::Client, video_id: &str, offset: u32) -> Re
         .error_for_status()?
         .json()
         .await?;
+    parse_page(responses)
+}
+
+fn parse_page(mut responses: Vec<Response>) -> Result<Page> {
     let response = responses.pop().ok_or_else(|| Error::Gql("empty response".into()))?;
     if let Some(err) = response.errors.into_iter().next() {
         return Err(Error::Gql(err.message));
@@ -167,4 +168,30 @@ pub async fn fetch_comments(
     }
     out.sort_by(|a, b| a.content_offset_seconds.total_cmp(&b.content_offset_seconds));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_comments_page() {
+        let responses = serde_json::from_str(include_str!("../../fixtures/comments.json")).unwrap();
+        let page = parse_page(responses).unwrap();
+        assert!(page.has_next);
+        assert_eq!(page.comments.len(), 3);
+        let c = &page.comments[0];
+        assert_eq!(c.content_offset_seconds, 600.0);
+        assert_eq!(c.commenter.as_ref().unwrap().display_name, "Alice");
+        assert_eq!(c.message.user_color.as_deref(), Some("#FF7F50"));
+        assert_eq!(c.message.user_badges[0].set_id, "subscriber");
+        assert_eq!(c.message.fragments[1].emote.as_ref().unwrap().emote_id, "25");
+        assert!(page.comments[2].commenter.is_none());
+    }
+
+    #[test]
+    fn missing_video() {
+        let responses = serde_json::from_str(r#"[{"data":{"video":null}}]"#).unwrap();
+        assert!(matches!(parse_page(responses), Err(Error::VideoNotFound)));
+    }
 }

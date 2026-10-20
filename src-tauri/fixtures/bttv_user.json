@@ -1,0 +1,6 @@
+{
+  "id": "x",
+  "bots": [],
+  "channelEmotes": [{ "id": "b3", "code": "monkaS", "imageType": "png", "animated": false }],
+  "sharedEmotes": [{ "id": "b4", "code": "PepeHands", "imageType": "gif", "animated": true }]
+}

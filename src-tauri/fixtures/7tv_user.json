@@ -1,0 +1,37 @@
+{
+  "id": "u1",
+  "platform": "TWITCH",
+  "emote_set": {
+    "id": "s1",
+    "emotes": [
+      {
+        "id": "e1",
+        "name": "OMEGALUL",
+        "flags": 0,
+        "data": {
+          "animated": false,
+          "host": {
+            "url": "//cdn.7tv.app/emote/e1",
+            "files": [
+              { "name": "1x.webp", "static_name": "1x.webp", "format": "WEBP" },
+              { "name": "2x.webp", "static_name": "2x.webp", "format": "WEBP" },
+              { "name": "2x.avif", "static_name": "2x.avif", "format": "AVIF" }
+            ]
+          }
+        }
+      },
+      {
+        "id": "e2",
+        "name": "catJAM",
+        "flags": 0,
+        "data": {
+          "animated": true,
+          "host": {
+            "url": "//cdn.7tv.app/emote/e2",
+            "files": [{ "name": "2x.webp", "static_name": "2x_static.webp", "format": "WEBP" }]
+          }
+        }
+      }
+    ]
+  }
+}
