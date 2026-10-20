@@ -62,4 +62,5 @@ export const api = {
   jobStart: (job: Job, overlay: OverlayStyle | null, outDir: string | null, nameTemplate: string) =>
     invoke<void>("job_start", { job, overlay, outDir, nameTemplate }),
   jobCancel: () => invoke<void>("job_cancel"),
+  errorLog: () => invoke<string | null>("error_log"),
 };

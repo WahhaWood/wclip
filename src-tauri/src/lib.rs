@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod cut;
+pub mod errlog;
 pub mod failure;
 pub mod images;
 pub mod job;
@@ -71,6 +72,12 @@ fn default_out_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(base.join("WClip"))
 }
 
+/// Writes `failure` to the error log on its way to the UI.
+fn log(context: &str, failure: Failure) -> Failure {
+    errlog::write(context, &failure.detail);
+    failure
+}
+
 fn ready_tools(state: &AppState) -> Result<tools::Tools, String> {
     state.tools.lock().unwrap().clone().ok_or_else(|| "tools are not installed".to_owned())
 }
@@ -90,7 +97,7 @@ async fn tools_install(app: AppHandle, state: State<'_, AppState>) -> Result<Vec
     let emit = |p: tools::Progress| {
         let _ = app.emit("tools-progress", p);
     };
-    tools::install_missing(&dir, &before, &emit).await.map_err(|e| e.to_string())?;
+    tools::install_missing(&dir, &before, &emit).await.map_err(|e| log("tools", e.to_string().into()).detail)?;
     let status = tools::status(&dir);
     *state.tools.lock().unwrap() = tools::Tools::from_status(&status);
     Ok(status)
@@ -99,7 +106,7 @@ async fn tools_install(app: AppHandle, state: State<'_, AppState>) -> Result<Vec
 #[tauri::command]
 async fn vod_info(input: String, state: State<'_, AppState>) -> Result<job::Vod, Failure> {
     let id = job::parse_vod_id(&input).ok_or("not a Twitch VOD link")?;
-    cut::vod_info(&ready_tools(&state)?, &id).await.map_err(|e| Failure::new(e.kind(), e))
+    cut::vod_info(&ready_tools(&state)?, &id).await.map_err(|e| log("vod", Failure::new(e.kind(), e)))
 }
 
 /// Settings with `out_dir` filled in when the user has not picked one.
@@ -143,7 +150,7 @@ async fn overlay_preview(
         (Some((p, t, frame)), Some(playlist)) if p == playlist && t == time => frame,
         (_, Some(playlist)) => {
             let tools = ready_tools(&state)?;
-            let frame = Arc::new(cut::grab_frame(&tools, &playlist, time).await.map_err(|e| Failure::new(e.kind(), e))?);
+            let frame = Arc::new(cut::grab_frame(&tools, &playlist, time).await.map_err(|e| log("preview", Failure::new(e.kind(), e)))?);
             *state.preview_frame.lock().unwrap() = Some((playlist, time, Arc::clone(&frame)));
             frame
         }
@@ -182,7 +189,7 @@ fn job_start(
         None => default_out_dir(&app)?,
     };
     let template = name_template.unwrap_or_default();
-    std::fs::create_dir_all(&out_dir)?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| log("out dir", e.into()))?;
     let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("images");
     // Without a timeout a request on a dropped connection can hang forever.
     let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
@@ -201,7 +208,7 @@ fn job_start(
                 Some(style) => match cut::load_chat(&client, &cache, &job.vod, interval, style).await {
                     Ok(chat) => Some(chat),
                     Err(e) => {
-                        let _ = app.emit("clip", ClipEvent::Failed { index, error: Failure::new(Kind::Chat, e) });
+                        let _ = app.emit("clip", ClipEvent::Failed { index, error: log(&format!("clip {} chat", index + 1), Failure::new(Kind::Chat, e)) });
                         continue;
                     }
                 },
@@ -219,11 +226,15 @@ fn job_start(
                 match cut::cut(&tools, &job.vod.playlist, interval, chat.clone(), &out, progress).await {
                     Ok(()) => break ClipEvent::Done { index, path: out, no_chat },
                     Err(e) if e.kind() == Kind::Network && attempt < RETRY_DELAYS.len() => {
+                        errlog::write(&format!("clip {} retry {}", index + 1, attempt + 1), &e.to_string());
                         let _ = app.emit("clip", ClipEvent::Retrying { index, attempt: attempt + 1 });
                         tokio::time::sleep(RETRY_DELAYS[attempt]).await;
                         attempt += 1;
                     }
-                    Err(e) => break ClipEvent::Failed { index, error: Failure::new(e.kind(), e) },
+                    Err(e) => {
+                        let error = log(&format!("clip {}", index + 1), Failure::new(e.kind(), e));
+                        break ClipEvent::Failed { index, error };
+                    }
                 }
             };
             let _ = app.emit("clip", event);
@@ -240,6 +251,12 @@ fn job_cancel(state: State<AppState>) {
     }
 }
 
+/// The error log file, `None` while it is empty.
+#[tauri::command]
+fn error_log() -> Option<PathBuf> {
+    errlog::path().map(PathBuf::from)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -247,6 +264,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
+            errlog::init(app.path().app_log_dir()?.join("wclip.log"));
             let dir = tools_dir(app.handle())?;
             tauri::async_runtime::spawn_blocking(move || tools::update_yt_dlp(&dir));
             Ok(())
@@ -260,7 +278,8 @@ pub fn run() {
             font_families,
             overlay_preview,
             job_start,
-            job_cancel
+            job_cancel,
+            error_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

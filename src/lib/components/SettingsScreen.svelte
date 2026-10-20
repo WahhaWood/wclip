@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import { api, type Corner, type Settings } from "$lib/api";
   import { explain } from "$lib/errors";
@@ -68,6 +69,15 @@
     if (existing) existing.style = style;
     else s.presets.push({ name, style });
     presetName = "";
+  }
+
+  let logEmpty = $state(false);
+
+  /** Shows the error log in its folder, so it can be attached to a bug report. */
+  async function showLog() {
+    const path = await api.errorLog();
+    logEmpty = !path;
+    if (path) await revealItemInDir(path);
   }
 
   async function chooseDir() {
@@ -193,6 +203,13 @@
         <p class="dim hint">
           Если у интервала нет своего имени. Подстановки: {"{channel}"} — канал, {"{vod}"} — номер
           записи, {"{start}"} и {"{end}"} — время, {"{n}"} — номер клипа.
+        </p>
+      </div>
+      <span>Журнал ошибок</span>
+      <div>
+        <button class="btn" onclick={showLog}>Показать файл</button>
+        <p class="dim hint">
+          {logEmpty ? "Ошибок пока не было." : "Приложите его к сообщению об ошибке. Ссылки в нём без токенов."}
         </p>
       </div>
     </div>
