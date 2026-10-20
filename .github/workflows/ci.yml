@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential file libxdo-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      # `tauri::generate_context!` embeds the built frontend at compile time.
+      - run: npm run build
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
+      # Network smoke tests are #[ignore]d and do not run here.
+      - run: cargo test
+        working-directory: src-tauri
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test
+        working-directory: src-tauri

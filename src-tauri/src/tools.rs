@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 const FFMPEG_URL: &str =
@@ -21,6 +22,10 @@ const FFMPEG_URL: &str =
 const YT_DLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 #[cfg(not(windows))]
 const YT_DLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
+/// `sha256sum` listings published next to the downloads. They come from the same
+/// release, so they catch a broken download, not a tampered release.
+const FFMPEG_SUMS_URL: &str = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/checksums.sha256";
+const YT_DLP_SUMS_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS";
 
 /// Touched after every self-update attempt of our yt-dlp copy.
 const YT_DLP_STAMP: &str = "yt-dlp.checked";
@@ -36,6 +41,8 @@ pub enum Error {
     Archive(String),
     #[error("{0} does not run after download")]
     Broken(&'static str),
+    #[error("{0}: checksum does not match, try again")]
+    Checksum(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -169,14 +176,14 @@ pub async fn install_missing(
 
     if missing(Tool::YtDlp) {
         let target = dir.join(Tool::YtDlp.file_name());
-        download(&client, YT_DLP_URL, &target, Tool::YtDlp, on_progress).await?;
+        download(&client, YT_DLP_URL, YT_DLP_SUMS_URL, &target, Tool::YtDlp, on_progress).await?;
         make_executable(&target)?;
         version(Tool::YtDlp, &target).ok_or(Error::Broken("yt-dlp"))?;
     }
 
     if missing(Tool::Ffmpeg) || missing(Tool::Ffprobe) {
         let archive = dir.join(if cfg!(windows) { "ffmpeg.zip" } else { "ffmpeg.tar.xz" });
-        download(&client, FFMPEG_URL, &archive, Tool::Ffmpeg, on_progress).await?;
+        download(&client, FFMPEG_URL, FFMPEG_SUMS_URL, &archive, Tool::Ffmpeg, on_progress).await?;
         let (archive_path, dir_path) = (archive.clone(), dir.to_owned());
         let extracted = tauri::async_runtime::spawn_blocking(move || {
             extract_ffmpeg(&archive_path, &dir_path)
@@ -195,29 +202,44 @@ pub async fn install_missing(
 }
 
 /// Streams `url` into `target` through a `.part` file, so a broken download never
-/// looks like an installed tool.
+/// looks like an installed tool, and checks it against the `sums_url` listing.
 async fn download(
     client: &reqwest::Client,
     url: &str,
+    sums_url: &str,
     target: &Path,
     tool: Tool,
     on_progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<()> {
+    let name = url.rsplit('/').next().unwrap_or(url);
+    let sums = client.get(sums_url).send().await?.error_for_status()?.text().await?;
+    let expected = crate::updater::checksum(&sums, name).ok_or_else(|| Error::Checksum(name.to_owned()))?;
+
     let mut resp = client.get(url).send().await?.error_for_status()?;
     let total = resp.content_length();
     let part = target.with_extension("part");
     let mut file = std::fs::File::create(&part)?;
+    let mut hasher = Sha256::new();
     let mut done = 0u64;
     on_progress(Progress { tool, done, total });
     while let Some(chunk) = resp.chunk().await? {
         file.write_all(&chunk)?;
+        hasher.update(&chunk);
         done += chunk.len() as u64;
         on_progress(Progress { tool, done, total });
     }
     file.flush()?;
     drop(file);
+    if !hex(&hasher.finalize()).eq_ignore_ascii_case(expected) {
+        let _ = std::fs::remove_file(&part);
+        return Err(Error::Checksum(name.to_owned()));
+    }
     std::fs::rename(&part, target)?;
     Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Pulls `bin/ffmpeg` and `bin/ffprobe` out of a BtbN archive into `dir`.
@@ -306,6 +328,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn download_checks_sum() {
+        let body = b"tool".to_vec();
+        let hash = hex(&Sha256::digest(&body));
+        let base = crate::updater::tests::serve(vec![
+            ("/dl/yt-dlp_test", body.clone()),
+            ("/good", format!("{hash}  yt-dlp_test\n").into_bytes()),
+            ("/bad", b"00ff  yt-dlp_test\n".to_vec()),
+            ("/other", format!("{hash}  something_else\n").into_bytes()),
+        ]);
+        let dir = temp_dir("sums");
+        let target = dir.join("yt-dlp");
+        let client = reqwest::Client::new();
+        let url = format!("{base}/dl/yt-dlp_test");
+        for sums in ["/bad", "/other"] {
+            let err = download(&client, &url, &format!("{base}{sums}"), &target, Tool::YtDlp, &|_| {}).await.unwrap_err();
+            assert!(matches!(err, Error::Checksum(_)), "{sums}: {err}");
+            assert!(!target.exists() && !target.with_extension("part").exists(), "{sums}");
+        }
+        download(&client, &url, &format!("{base}/good"), &target, Tool::YtDlp, &|_| {}).await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

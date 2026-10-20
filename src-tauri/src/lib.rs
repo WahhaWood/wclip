@@ -28,14 +28,17 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
 }
 
+/// A cached preview frame: (playlist, VOD time, JPEG).
+type PreviewFrame = (String, f64, Arc<Vec<u8>>);
+
 #[derive(Default)]
 struct AppState {
     /// Set once every tool is found or installed.
     tools: Mutex<Option<tools::Tools>>,
     /// The running job; aborting it kills ffmpeg (see `cut::cut`).
     job: Mutex<Option<JoinHandle<()>>>,
-    /// Recent preview frames: (playlist, VOD time, JPEG), newest last.
-    preview_frames: Mutex<Vec<(String, f64, Arc<Vec<u8>>)>>,
+    /// Recent preview frames, newest last.
+    preview_frames: Mutex<Vec<PreviewFrame>>,
     /// Chat of the whole video open on the home screen.
     chat: Mutex<Option<LoadedChat>>,
     /// The `chat_load` in progress; a new one aborts it.

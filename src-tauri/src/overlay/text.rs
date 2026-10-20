@@ -99,6 +99,12 @@ static FONT_DB: LazyLock<fontdb::Database> = LazyLock::new(|| {
     db
 });
 
+impl Default for Typesetter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Typesetter {
     /// Scans the fonts ahead of the first overlay; call from a background thread.
     pub fn warm_up() {
@@ -234,7 +240,7 @@ impl Typesetter {
 pub fn scale(img: &RgbaImage, width: u32, height: u32) -> Pixmap {
     let resized = imageops::resize(img, width, height, FilterType::CatmullRom);
     let mut data = resized.into_raw();
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         let a = u16::from(px[3]);
         for c in &mut px[..3] {
             *c = ((u16::from(*c) * a + 127) / 255) as u8;

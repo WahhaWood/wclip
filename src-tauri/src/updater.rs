@@ -140,7 +140,7 @@ fn is_newer(tag: &str, current: &str) -> Result<bool> {
 }
 
 /// Hash of `name` in a `sha256sum` listing (`<hex>  <name>`, or `<hex> *<name>`).
-fn checksum<'a>(sums: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn checksum<'a>(sums: &'a str, name: &str) -> Option<&'a str> {
     sums.lines().find_map(|line| {
         let (hash, file) = line.split_once(char::is_whitespace)?;
         (file.trim_start().trim_start_matches('*') == name).then_some(hash)
@@ -228,7 +228,7 @@ impl Drop for PartFile {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
     }
 
     /// Serves `files` (path, body) over HTTP on localhost, one request per connection.
-    fn serve(files: Vec<(&'static str, Vec<u8>)>) -> String {
+    pub(crate) fn serve(files: Vec<(&'static str, Vec<u8>)>) -> String {
         use std::io::{BufRead, BufReader};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

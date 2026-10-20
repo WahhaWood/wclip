@@ -247,7 +247,7 @@ fn sample_messages() -> Vec<ChatMessage> {
 
 fn demultiply(premultiplied: &[u8]) -> Vec<u8> {
     let mut out = premultiplied.to_vec();
-    for px in out.chunks_exact_mut(4) {
+    for px in out.as_chunks_mut::<4>().0 {
         let a = u16::from(px[3]);
         if a > 0 && a < 255 {
             for c in &mut px[..3] {
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn animated_emotes_move() {
         let mut overlay = animated_overlay(OverlayStyle::default());
-        let count = |buf: &[u8], pick: fn(&[u8]) -> bool| buf.chunks_exact(4).filter(|p| pick(p)).count();
+        let count = |buf: &[u8], pick: fn(&[u8]) -> bool| buf.as_chunks::<4>().0.iter().filter(|p| pick(*p)).count();
         let green = |p: &[u8]| p[1] > 200 && p[2] < 50;
         let blue = |p: &[u8]| p[2] > 200 && p[1] < 50;
         let a = overlay.frame(10.2);
