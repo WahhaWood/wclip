@@ -3,7 +3,8 @@
 ## Bundled in the binary
 
 - **Inter** by Rasmus Andersson, SIL Open Font License 1.1.
-  Files: `src-tauri/assets/fonts/Inter-*.ttf`, license: `src-tauri/assets/fonts/Inter-LICENSE.txt`.
+  Files: `src-tauri/assets/fonts/Inter-*.ttf` (chat overlay) and `static/fonts/Inter-*.ttf` (interface),
+  license: `src-tauri/assets/fonts/Inter-LICENSE.txt`.
 - **Twemoji Mozilla** font (emoji in chat). Font build: Mozilla, Apache License 2.0.
   Emoji graphics: Twemoji by Twitter, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
   File: `src-tauri/assets/fonts/Twemoji.Mozilla.ttf`, license: `src-tauri/assets/fonts/Twemoji-LICENSE.md`.
