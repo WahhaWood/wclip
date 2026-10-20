@@ -3,6 +3,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Manual run builds both binaries without publishing a release.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,6 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Tag matches app version
+        if: github.ref_type == 'tag'
         run: test "v$(node -p "require('./src-tauri/tauri.conf.json').version")" = "$GITHUB_REF_NAME"
       - run: |
           sudo apt-get update
@@ -46,6 +49,7 @@ jobs:
 
   release:
     needs: [linux, windows]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
