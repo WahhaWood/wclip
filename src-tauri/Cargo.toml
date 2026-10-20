@@ -31,6 +31,8 @@ unicode-script = "0.5"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
 tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt", "time"] }
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+semver = "1.0.28"
+sha2 = "0.11.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "time"] }
@@ -43,3 +45,6 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+[target."cfg(windows)".dependencies]
+self-replace = "1.5.0"

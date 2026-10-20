@@ -289,7 +289,8 @@ pub fn update_yt_dlp(dir: &Path) {
     let _ = std::fs::write(&stamp, b"");
 }
 
-fn update_due(stamp: &Path, now: SystemTime) -> bool {
+/// Whether a day has passed since `stamp` was last written (or it does not exist).
+pub(crate) fn update_due(stamp: &Path, now: SystemTime) -> bool {
     let Ok(modified) = std::fs::metadata(stamp).and_then(|m| m.modified()) else {
         return true;
     };

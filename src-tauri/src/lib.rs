@@ -8,10 +8,11 @@ pub mod overlay;
 pub mod settings;
 pub mod tools;
 pub mod twitch;
+pub mod updater;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use failure::{Failure, Kind};
 use serde::Serialize;
@@ -33,6 +34,10 @@ struct AppState {
     job: Mutex<Option<JoinHandle<()>>>,
     /// Last preview frame: (playlist, VOD time, frame).
     preview_frame: Mutex<Option<(String, f64, Arc<RgbaImage>)>>,
+    /// Release found by the last update check.
+    update: Mutex<Option<updater::Release>>,
+    /// Updated copy to start on restart.
+    update_ready: Mutex<Option<PathBuf>>,
 }
 
 /// Payload of `clip` events: one per state change or progress tick of a clip.
@@ -76,6 +81,16 @@ fn default_out_dir(app: &AppHandle) -> Result<PathBuf, String> {
 fn log(context: &str, failure: Failure) -> Failure {
     errlog::write(context, &failure.detail);
     failure
+}
+
+fn job_running(state: &AppState) -> bool {
+    state.job.lock().unwrap().as_ref().is_some_and(|h| !h.inner().is_finished())
+}
+
+/// No total timeout: a release is ~80 MB. A stalled read still fails.
+fn updater_client() -> Result<reqwest::Client, Failure> {
+    let builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).read_timeout(Duration::from_secs(30));
+    Ok(builder.build().map_err(|e| e.to_string())?)
 }
 
 fn ready_tools(state: &AppState) -> Result<tools::Tools, String> {
@@ -251,6 +266,59 @@ fn job_cancel(state: State<AppState>) {
     }
 }
 
+/// The latest release if it is newer, checked at most once a day unless `force`.
+/// A failed unforced check stays silent: being offline is no reason to bother the user.
+#[tauri::command]
+async fn update_check(app: AppHandle, state: State<'_, AppState>, force: bool) -> Result<Option<updater::Info>, Failure> {
+    let stamp = app.path().app_data_dir().map_err(|e| e.to_string())?.join("update.checked");
+    if !force && !tools::update_due(&stamp, SystemTime::now()) {
+        return Ok(None);
+    }
+    match updater::latest(&updater_client()?).await {
+        Ok(release) => {
+            if let Some(dir) = stamp.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&stamp, b"");
+            let info = release.as_ref().map(updater::Release::info);
+            *state.update.lock().unwrap() = release;
+            Ok(info)
+        }
+        Err(e) => {
+            let failure = log("update check", Failure::new(e.kind(), e));
+            if force { Err(failure) } else { Ok(None) }
+        }
+    }
+}
+
+/// Downloads and puts in place the release found by `update_check`, reporting
+/// `update-progress` events; `update_restart` then starts it.
+#[tauri::command]
+async fn update_install(app: AppHandle, state: State<'_, AppState>) -> Result<(), Failure> {
+    let release = state.update.lock().unwrap().clone().ok_or("no update found")?;
+    let progress = |done: u64, total: Option<u64>| {
+        let _ = app.emit("update-progress", serde_json::json!({ "done": done, "total": total }));
+    };
+    let target = updater::target().ok_or("this copy cannot update itself")?;
+    updater::install(&updater_client()?, &release, &target, progress)
+        .await
+        .map_err(|e| log("update", Failure::new(e.kind(), e)))?;
+    *state.update_ready.lock().unwrap() = Some(target);
+    Ok(())
+}
+
+/// Starts the updated copy and quits; refused while clips are being cut.
+#[tauri::command]
+fn update_restart(app: AppHandle, state: State<AppState>) -> Result<(), Failure> {
+    if job_running(&state) {
+        return Err("clips are still being cut".into());
+    }
+    let target = state.update_ready.lock().unwrap().clone().ok_or("no update installed")?;
+    updater::launch(&target).map_err(|e| log("restart", e.into()))?;
+    app.exit(0);
+    Ok(())
+}
+
 /// The error log file, `None` while it is empty.
 #[tauri::command]
 fn error_log() -> Option<PathBuf> {
@@ -279,7 +347,10 @@ pub fn run() {
             overlay_preview,
             job_start,
             job_cancel,
-            error_log
+            error_log,
+            update_check,
+            update_install,
+            update_restart
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

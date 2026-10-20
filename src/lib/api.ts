@@ -37,7 +37,12 @@ export type Settings = {
   chat: boolean;
   overlay: OverlayStyle;
   presets: Preset[];
+  skippedVersion: string | null;
 };
+
+/** A release newer than the running app; `installable` false means linking to `page`. */
+export type UpdateInfo = { version: string; notes: string; page: string; installable: boolean };
+export type UpdateProgress = { done: number; total: number | null };
 
 export type FailureKind = "vod-missing" | "sub-only" | "network" | "disk-full" | "chat" | "other";
 /** Error of commands and failed clips; turn it into words with `explain` (errors.ts). */
@@ -63,4 +68,7 @@ export const api = {
     invoke<void>("job_start", { job, overlay, outDir, nameTemplate }),
   jobCancel: () => invoke<void>("job_cancel"),
   errorLog: () => invoke<string | null>("error_log"),
+  updateCheck: (force: boolean) => invoke<UpdateInfo | null>("update_check", { force }),
+  updateInstall: () => invoke<void>("update_install"),
+  updateRestart: () => invoke<void>("update_restart"),
 };

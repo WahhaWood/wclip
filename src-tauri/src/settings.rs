@@ -17,6 +17,8 @@ pub struct Settings {
     pub chat: bool,
     pub overlay: OverlayStyle,
     pub presets: Vec<Preset>,
+    /// Release the user chose to skip; its update banner is not shown again.
+    pub skipped_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,7 @@ impl Default for Settings {
             chat: true,
             overlay: OverlayStyle::default(),
             presets: Vec::new(),
+            skipped_version: None,
         }
     }
 }

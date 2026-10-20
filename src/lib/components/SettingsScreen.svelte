@@ -1,10 +1,11 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
+  import { getVersion } from "@tauri-apps/api/app";
   import { onMount } from "svelte";
   import { api, type Corner, type Settings } from "$lib/api";
   import { explain } from "$lib/errors";
-  import { app } from "$lib/state.svelte";
+  import { app, showUpdate } from "$lib/state.svelte";
   import { parseTime } from "$lib/time";
 
   // The parent renders this screen only once settings are loaded.
@@ -69,6 +70,25 @@
     if (existing) existing.style = style;
     else s.presets.push({ name, style });
     presetName = "";
+  }
+
+  let version = $state("");
+  getVersion().then((v) => (version = v));
+  let checking = $state(false);
+  let updateNote = $state<ReturnType<typeof explain> | null>(null);
+
+  async function checkUpdate() {
+    checking = true;
+    updateNote = null;
+    try {
+      const u = await api.updateCheck(true);
+      if (u) showUpdate(u);
+      else updateNote = { text: "Установлена последняя версия.", detail: null };
+    } catch (e) {
+      updateNote = explain(e);
+    } finally {
+      checking = false;
+    }
   }
 
   let logEmpty = $state(false);
@@ -203,6 +223,15 @@
         <p class="dim hint">
           Если у интервала нет своего имени. Подстановки: {"{channel}"} — канал, {"{vod}"} — номер
           записи, {"{start}"} и {"{end}"} — время, {"{n}"} — номер клипа.
+        </p>
+      </div>
+      <span>Обновления</span>
+      <div>
+        <button class="btn" disabled={checking} onclick={checkUpdate}>
+          {checking ? "Проверяем…" : "Проверить обновления"}
+        </button>
+        <p class="dim hint" title={updateNote?.detail}>
+          WClip {version}{updateNote ? ` · ${updateNote.text}` : ""}
         </p>
       </div>
       <span>Журнал ошибок</span>

@@ -5,6 +5,7 @@
   import Queue from "$lib/components/Queue.svelte";
   import SettingsScreen from "$lib/components/SettingsScreen.svelte";
   import ToolsSetup from "$lib/components/ToolsSetup.svelte";
+  import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import { app, initApp, saveSettings, type Screen } from "$lib/state.svelte";
 
   let tools = $state<ToolInfo[] | null>(null);
@@ -54,6 +55,9 @@
         {/each}
       </nav>
     </header>
+    {#if app.update}
+      <UpdateBanner />
+    {/if}
     <main>
       {#if app.screen === "home"}
         <Home />
