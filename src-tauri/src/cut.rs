@@ -27,6 +27,11 @@ const PRESET: &str = "veryfast";
 /// segment 3 times before the demuxer skips it.
 const HLS_INPUT: [&str; 4] = ["-rw_timeout", "20000000", "-seg_max_retry", "3"];
 
+/// Input options for `input`: a VOD playlist URL or a local file path.
+fn input_args(input: &str) -> &'static [&'static str] {
+    if input.starts_with("http") { &HLS_INPUT } else { &[] }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("io: {0}")]
@@ -82,6 +87,55 @@ pub async fn vod_info(tools: &Tools, id: &str) -> Result<Vod> {
         thumbnail: info.thumbnail,
         playlist: info.url,
         height: info.height,
+        local: false,
+        started: None,
+    })
+}
+
+#[derive(Deserialize)]
+struct Probe {
+    format: ProbeFormat,
+    #[serde(default)]
+    streams: Vec<ProbeStream>,
+}
+
+#[derive(Deserialize)]
+struct ProbeFormat {
+    duration: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProbeStream {
+    height: Option<u32>,
+}
+
+/// A video file on disk as a `Vod` (see `Vod::local`).
+pub async fn local_info(tools: &Tools, path: &Path) -> Result<Vod> {
+    let out = tokio_command(&tools.ffprobe)
+        .args(["-v", "error", "-print_format", "json", "-show_entries", "format=duration:stream=height"])
+        .args(["-select_streams", "v:0"])
+        .arg(path)
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Err(tool_error(&out.stderr, "ffprobe"));
+    }
+    let probe: Probe = serde_json::from_slice(&out.stdout)?;
+    let duration = probe.format.duration.and_then(|d| d.parse::<f64>().ok());
+    let (Some(duration), Some(height)) = (duration, probe.streams.first().map(|s| s.height)) else {
+        return Err(Error::Tool("ffprobe: no video in the file".into()));
+    };
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(Vod {
+        started: chat::log::started_from_name(&stem, duration),
+        id: stem,
+        title: path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        channel: String::new(),
+        duration,
+        thumbnail: None,
+        playlist: path.to_string_lossy().into_owned(),
+        height,
+        local: true,
     })
 }
 
@@ -98,7 +152,7 @@ pub struct ChatOverlay {
 pub async fn grab_frame(tools: &Tools, playlist: &str, t: f64) -> Result<Vec<u8>> {
     let out = tokio_command(&tools.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
-        .args(HLS_INPUT)
+        .args(input_args(playlist))
         .args(["-ss", &t.to_string(), "-i", playlist])
         .args(["-frames:v", "1", "-vf", "scale=960:-2", "-q:v", "3", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"])
         .output()
@@ -122,6 +176,19 @@ pub async fn load_chat(
     let style = style.scaled(vod.height.unwrap_or(1080));
     let start = (interval.start - style.lookback()).max(0.0);
     let messages = chat::load(client, &vod.id, start, interval.end).await?;
+    Ok(with_images(cache, style, messages).await)
+}
+
+/// Like `load_chat`, from the messages of a chat log (`chat::from_log`). Lookback
+/// may reach before the video: the chat went on before the recording started.
+pub async fn log_chat(cache: &ImageCache, vod: &Vod, interval: &Interval, style: &OverlayStyle, all: &[ChatMessage]) -> ChatOverlay {
+    let style = style.scaled(vod.height.unwrap_or(1080));
+    let start = interval.start - style.lookback();
+    let messages = all.iter().filter(|m| m.time >= start && m.time < interval.end).cloned().collect();
+    with_images(cache, style, messages).await
+}
+
+async fn with_images(cache: &ImageCache, style: OverlayStyle, messages: Vec<ChatMessage>) -> ChatOverlay {
     let urls: BTreeSet<String> = messages
         .iter()
         .flat_map(|m| {
@@ -133,7 +200,7 @@ pub async fn load_chat(
         })
         .collect();
     let images = cache.get_all(urls).await;
-    Ok(ChatOverlay { style, messages, images })
+    ChatOverlay { style, messages, images }
 }
 
 /// Encodes `interval` of the VOD into `out` (MP4), with the chat on top if given.
@@ -152,7 +219,7 @@ pub async fn cut(
     let mut cmd = tokio_command(&tools.ffmpeg);
     // Warnings too: that is where the demuxer reports a skipped segment.
     cmd.args(["-hide_banner", "-nostdin", "-loglevel", "level+warning", "-nostats", "-progress", "pipe:1"])
-        .args(HLS_INPUT)
+        .args(input_args(playlist))
         .args(["-ss", &interval.start.to_string(), "-i", playlist]);
     match &chat {
         Some(chat) => {
@@ -372,6 +439,62 @@ mod tests {
         assert_eq!(before, 0, "message shown early");
         assert!(after > 1000, "message late");
         assert!(settled > 5000);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A local OBS replay with a Chatterino log: the file name gives the start time,
+    /// a message 3 s into the video appears 2 s into a clip cut from 1 s.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn smoke_local_log() {
+        let dir = smoke_dir("local");
+        let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
+        let video = dir.join("Replay 2026-10-19 20-00-06.mkv");
+        let ok = tools::command(&tools.ffmpeg)
+            .args(["-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=1280x720:r=30:d=6"])
+            .args(["-f", "lavfi", "-i", "sine=d=6", "-c:v", "libx264", "-c:a", "aac", "-shortest"])
+            .arg(&video)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let log_path = dir.join("testchan-2026-10-19.log");
+        let log_text = "# Start logging at 2026-10-19 19:59:00 MSK\n\
+                        [19:59:30] early: before the recording\n\
+                        [20:00:03] alice: Hello from the log\n";
+        std::fs::write(&log_path, log_text).unwrap();
+
+        let vod = local_info(&tools, &video).await.unwrap();
+        assert!(vod.local && (vod.duration - 6.0).abs() < 0.1, "{vod:?}");
+        assert_eq!(vod.height, Some(720));
+        let started = vod.started.unwrap();
+        // Off by the container duration's padding (AAC priming): fine for a chat.
+        assert!((started - chat::log::naive_seconds(2026, 10, 19, 20, 0, 0.0)).abs() < 0.1);
+
+        let log = chat::log::open(&log_path).unwrap();
+        let all = chat::from_log(&reqwest::Client::new(), &log, started.round()).await;
+        assert_eq!(all.iter().map(|m| m.time).collect::<Vec<_>>(), [-30.0, 3.0]);
+
+        let interval = Interval { start: 1.0, end: 5.0, name: String::new() };
+        let style = OverlayStyle { lifetime: 10.0, ..OverlayStyle::default() };
+        let cache = ImageCache::new(dir.join("images"), reqwest::Client::new());
+        let chat = log_chat(&cache, &vod, &interval, &style, &all).await;
+        assert_eq!(chat.messages.len(), 1, "the early one is out of lookback");
+        let (x, y, w, h) = (chat.style.x, chat.style.y, chat.style.width, chat.style.height);
+        let out = dir.join("clip.mp4");
+        cut(&tools, &vod.playlist, &interval, Some(chat), &out, |_| {}).await.unwrap();
+
+        let bright = |img: &RgbaImage| {
+            let panel = image::imageops::crop_imm(img, x, y, w, h).to_image();
+            panel.pixels().filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200).count()
+        };
+        let before = bright(&frame_at(&tools, &out, 1.5));
+        let frame = frame_at(&tools, &out, 3.0);
+        frame.save(concat!(env!("CARGO_MANIFEST_DIR"), "/target/local-clip.png")).unwrap();
+        let after = bright(&frame);
+        println!("bright panel pixels: before {before}, after {after}");
+        assert_eq!(before, 0);
+        assert!(after > 200);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

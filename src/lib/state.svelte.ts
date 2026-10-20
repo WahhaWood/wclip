@@ -2,6 +2,8 @@
 import { listen } from "@tauri-apps/api/event";
 import {
   api,
+  type ChatLogInfo,
+  type ChatLogRef,
   type ClipEvent,
   type Failure,
   type Interval,
@@ -40,9 +42,12 @@ export const app = $state({
   screen: "home" as Screen,
   settings: null as Settings | null,
   vod: null as Vod | null,
+  /** Chat log picked for a local video. */
+  chatLog: null as { path: string; info: ChatLogInfo } | null,
   rows: [] as Row[],
   /** VOD of the queue: the home screen may already show another one. */
   queueVod: null as Vod | null,
+  queueChatLog: null as ChatLogRef | null,
   queue: [] as QueueItem[],
   /** Queue index of each interval of the running job, by its index in the job. */
   jobItems: [] as number[],
@@ -70,7 +75,11 @@ export function saveSettings() {
 export async function runJob(items: number[], overlay: OverlayStyle | null) {
   const s = app.settings;
   if (!app.queueVod || !s) return;
-  const job = { vod: $state.snapshot(app.queueVod), intervals: items.map((i) => $state.snapshot(app.queue[i].interval)) };
+  const job = {
+    vod: $state.snapshot(app.queueVod),
+    intervals: items.map((i) => $state.snapshot(app.queue[i].interval)),
+    chat_log: $state.snapshot(app.queueChatLog),
+  };
   for (const i of items) app.queue[i].status = { state: "waiting" };
   app.jobItems = items;
   await api.jobStart(job, overlay, s.outDir, s.nameTemplate);

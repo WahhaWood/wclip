@@ -35,6 +35,31 @@ export function formatTime(seconds: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
 }
 
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/** `YYYY-MM-DD HH:MM:SS` of naive local seconds (see `chat::log` on the Rust side). */
+export function formatClock(seconds: number): string {
+  const d = new Date(Math.round(seconds) * 1000);
+  const date = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  return `${date} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+
+/**
+ * Naive local seconds from `YYYY-MM-DD HH:MM:SS`, or from `HH:MM:SS` on the date of
+ * `near` (also naive seconds); `null` when the text is not a date and time.
+ */
+export function parseClock(text: string, near: number): number | null {
+  const m = /^\s*(?:(\d{4})-(\d{2})-(\d{2})[ T]+)?(\d{1,2}):(\d{2}):(\d{2})\s*$/.exec(text);
+  if (!m) return null;
+  const [h, min, s] = [m[4], m[5], m[6]].map(Number);
+  if (h > 23 || min > 59 || s > 59) return null;
+  const day = m[1]
+    ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 1000
+    : Math.floor(near / 86400) * 86400;
+  if (m[1] && formatClock(day).slice(0, 10) !== `${m[1]}-${m[2]}-${m[3]}`) return null;
+  return day + h * 3600 + min * 60 + s;
+}
+
 /**
  * One interval per line: `start end`, `start - end` or `start–end`, then an optional
  * clip name. Empty lines are skipped; lines that do not parse go to `bad`.

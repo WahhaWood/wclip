@@ -17,6 +17,22 @@ pub struct Vod {
     pub playlist: String,
     /// Video height of that playlist, pixels.
     pub height: Option<u32>,
+    /// A video file on disk rather than a Twitch VOD: `playlist` is its path, `id`
+    /// its name, and the chat comes from `Job::chat_log`.
+    #[serde(default)]
+    pub local: bool,
+    /// Naive local time the file starts at, when its name says (see
+    /// `chat::log::started_from_name`).
+    #[serde(default)]
+    pub started: Option<f64>,
+}
+
+/// Chat log for a local video.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatLogRef {
+    pub path: PathBuf,
+    /// Chat time at 0:00 of the video.
+    pub start: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +48,8 @@ pub struct Interval {
 pub struct Job {
     pub vod: Vod,
     pub intervals: Vec<Interval>,
+    #[serde(default)]
+    pub chat_log: Option<ChatLogRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, thiserror::Error)]
@@ -89,6 +107,9 @@ pub fn clip_path(dir: &Path, template: &str, vod: &Vod, interval: &Interval, n: 
             .replace("{start}", &hms(interval.start))
             .replace("{end}", &hms(interval.end))
             .replace("{n}", &n.to_string())
+            // A local video may have no channel: no `_name_...`.
+            .trim_matches(|c| c == '_' || c == '-' || c == ' ')
+            .to_owned()
     } else {
         interval.name.trim().to_owned()
     };
@@ -172,11 +193,14 @@ mod tests {
                 thumbnail: None,
                 playlist: String::new(),
                 height: None,
+                local: false,
+                started: None,
             },
             intervals: intervals
                 .iter()
                 .map(|&(start, end)| Interval { start, end, name: String::new() })
                 .collect(),
+            chat_log: None,
         }
     }
 
@@ -189,6 +213,8 @@ mod tests {
         job.vod.channel = "chan".into();
         let iv = &mut job.intervals[0];
         assert_eq!(clip_path(&dir, "", &job.vod, iv, 1), dir.join("chan_1_01-02-05.mp4"));
+        let local = Vod { channel: String::new(), id: "Replay 1".into(), ..job.vod.clone() };
+        assert_eq!(clip_path(&dir, "", &local, iv, 1), dir.join("Replay 1_01-02-05.mp4"));
         let custom = "{n}. {channel} {start}-{end}";
         assert_eq!(clip_path(&dir, custom, &job.vod, iv, 3), dir.join("3. chan 01-02-05-01-03-20.mp4"));
 

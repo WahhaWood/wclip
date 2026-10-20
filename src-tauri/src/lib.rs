@@ -123,6 +123,22 @@ async fn vod_info(input: String, state: State<'_, AppState>) -> Result<job::Vod,
     cut::vod_info(&ready_tools(&state)?, &id).await.map_err(|e| log("vod", Failure::new(e.kind(), e)))
 }
 
+/// A video file on disk, to cut instead of a VOD.
+#[tauri::command]
+async fn local_video(path: PathBuf, state: State<'_, AppState>) -> Result<job::Vod, Failure> {
+    cut::local_info(&ready_tools(&state)?, &path).await.map_err(|e| log("local video", Failure::new(e.kind(), e)))
+}
+
+/// Reads a chat log for a local video; the job reads it again when it starts.
+#[tauri::command]
+async fn chat_log_open(path: PathBuf) -> Result<chat::log::ChatLogInfo, Failure> {
+    tauri::async_runtime::spawn_blocking(move || chat::log::open(&path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|log| log.info)
+        .map_err(|e| log("chat log", Failure::new(Kind::Other, e)))
+}
+
 /// Settings with `out_dir` filled in when the user has not picked one.
 #[tauri::command]
 fn settings_load(app: AppHandle) -> Result<settings::Settings, String> {
@@ -176,7 +192,8 @@ async fn overlay_panel(style: overlay::OverlayStyle) -> Result<Response, String>
 }
 
 /// Starts cutting every interval in order, reporting `clip` events and `job-done`
-/// at the end. No `overlay` style means clips without chat. `out_dir` defaults to
+/// at the end. No `overlay` style means clips without chat; a local video without
+/// `chat_log` is cut without chat too. `out_dir` defaults to
 /// `<Videos>/WClip`, `name_template` to `job::DEFAULT_TEMPLATE`.
 #[tauri::command]
 fn job_start(
@@ -209,17 +226,36 @@ fn job_start(
     *running = Some(tauri::async_runtime::spawn(async move {
         let app = task_app;
         let cache = images::ImageCache::new(cache_dir, client.clone());
+        // A local video's chat is read once for all its clips.
+        let log_messages = match (&job.chat_log, &overlay) {
+            (Some(log_ref), Some(_)) if job.vod.local => {
+                let path = log_ref.path.clone();
+                let opened = tauri::async_runtime::spawn_blocking(move || chat::log::open(&path)).await;
+                Some(match opened {
+                    Ok(Ok(chat_log)) => Ok(chat::from_log(&client, &chat_log, log_ref.start).await),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                })
+            }
+            _ => None,
+        };
+        let overlay = overlay.filter(|_| !job.vod.local || log_messages.is_some());
         for (index, interval) in job.intervals.iter().enumerate() {
             let _ = app.emit("clip", ClipEvent::Preparing { index });
             let chat = match &overlay {
-                Some(style) => match cut::load_chat(&client, &cache, &job.vod, interval, style).await {
-                    Ok(chat) => Some(chat),
-                    Err(e) => {
-                        let _ = app.emit("clip", ClipEvent::Failed { index, error: log(&format!("clip {} chat", index + 1), Failure::new(Kind::Chat, e)) });
-                        continue;
-                    }
+                Some(style) => match &log_messages {
+                    Some(Ok(all)) => Ok(Some(cut::log_chat(&cache, &job.vod, interval, style, all).await)),
+                    Some(Err(e)) => Err(e.clone()),
+                    None => cut::load_chat(&client, &cache, &job.vod, interval, style).await.map(Some).map_err(|e| e.to_string()),
                 },
-                None => None,
+                None => Ok(None),
+            };
+            let chat = match chat {
+                Ok(chat) => chat,
+                Err(e) => {
+                    let _ = app.emit("clip", ClipEvent::Failed { index, error: log(&format!("clip {} chat", index + 1), Failure::new(Kind::Chat, e)) });
+                    continue;
+                }
             };
             // An empty panel would only cover the video.
             let no_chat = chat.as_ref().is_some_and(|c| c.messages.is_empty());
@@ -334,6 +370,8 @@ pub fn run() {
             tools_status,
             tools_install,
             vod_info,
+            local_video,
+            chat_log_open,
             settings_load,
             settings_save,
             font_families,

@@ -34,6 +34,20 @@ pub async fn video_owner(client: &reqwest::Client, video_id: &str) -> Result<Own
     data.video.and_then(|v| v.owner).ok_or(Error::VideoNotFound)
 }
 
+/// Numeric id of the channel `login`; `None` if there is no such user.
+pub async fn user_id(client: &reqwest::Client, login: &str) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Data {
+        user: Option<User>,
+    }
+    #[derive(Deserialize)]
+    struct User {
+        id: String,
+    }
+    let data: Data = query(client, "query($login:String!){user(login:$login){id}}", json!({ "login": login })).await?;
+    Ok(data.user.map(|u| u.id))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BadgeImage {

@@ -13,10 +13,19 @@ export type Vod = {
   thumbnail: string | null;
   playlist: string;
   height: number | null;
+  /** A file on disk: `playlist` is its path, the chat comes from a chat log. */
+  local: boolean;
+  /** Naive local time (seconds) the file starts at, from its name. */
+  started: number | null;
 };
 
+/** `clock`: times are naive local wall-clock seconds, else seconds of the VOD. */
+export type ChatLogInfo = { channel: string; clock: boolean; start: number; count: number };
+/** `start`: chat time at 0:00 of the video. */
+export type ChatLogRef = { path: string; start: number };
+
 export type Interval = { start: number; end: number; name: string };
-export type Job = { vod: Vod; intervals: Interval[] };
+export type Job = { vod: Vod; intervals: Interval[]; chat_log: ChatLogRef | null };
 
 /** Positions and sizes are pixels at 1080p; (x, y) is the panel's top-left corner. */
 export type OverlayStyle = {
@@ -61,6 +70,8 @@ export const api = {
   toolsStatus: () => invoke<ToolInfo[]>("tools_status"),
   toolsInstall: () => invoke<ToolInfo[]>("tools_install"),
   vodInfo: (input: string) => invoke<Vod>("vod_info", { input }),
+  localVideo: (path: string) => invoke<Vod>("local_video", { path }),
+  chatLogOpen: (path: string) => invoke<ChatLogInfo>("chat_log_open", { path }),
   settingsLoad: () => invoke<Settings>("settings_load"),
   settingsSave: (settings: Settings) => invoke<void>("settings_save", { settings }),
   fontFamilies: () => invoke<string[]>("font_families"),

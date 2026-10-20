@@ -2,6 +2,7 @@
 //! resolved to URLs.
 
 pub mod emotes;
+pub mod log;
 
 use crate::twitch::channel::{self, Badges};
 use crate::twitch::{self, chat::Comment};
@@ -9,7 +10,7 @@ use emotes::Emotes;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessage {
-    /// Seconds from the start of the VOD.
+    /// Seconds from the start of the video.
     pub time: f64,
     pub name: String,
     pub color: [u8; 3],
@@ -59,6 +60,29 @@ pub async fn load(
     );
     let (badges, comments) = (badges?, comments?);
     Ok(comments.iter().filter_map(|c| build(c, &badges, &emotes)).collect())
+}
+
+/// Every message of `log`, timed from 0:00 of a video that starts at chat time
+/// `start`. Badges and emotes are best effort: offline the chat stays plain text.
+pub async fn from_log(client: &reqwest::Client, log: &log::ChatLog, start: f64) -> Vec<ChatMessage> {
+    let id = match &log.channel_id {
+        Some(id) => Some(id.clone()),
+        None if !log.info.channel.is_empty() => channel::user_id(client, &log.info.channel).await.ok().flatten(),
+        None => None,
+    };
+    let (badges, emotes) = match &id {
+        Some(id) => {
+            let (badges, emotes) = tokio::join!(channel::badges(client, id), emotes::load(client, id));
+            (badges.unwrap_or_default(), emotes)
+        }
+        // Global third-party emotes still apply.
+        None => (Badges::new(), emotes::load(client, "").await),
+    };
+    log.comments
+        .iter()
+        .filter_map(|c| build(c, &badges, &emotes))
+        .map(|m| ChatMessage { time: m.time - start, ..m })
+        .collect()
 }
 
 /// `None` for comments of deleted accounts: there is no name to show.

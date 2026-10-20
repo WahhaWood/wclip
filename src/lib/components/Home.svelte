@@ -1,9 +1,14 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, type Interval } from "$lib/api";
   import { explain } from "$lib/errors";
   import { app, newRow, runJob, type Row } from "$lib/state.svelte";
-  import { formatTime, parseIntervalList, parseTime } from "$lib/time";
+  import { formatClock, formatTime, parseClock, parseIntervalList, parseTime } from "$lib/time";
+
+  const VIDEO = ["mp4", "mkv", "mov", "flv", "ts", "webm", "avi"];
+  const CHAT_LOG = ["log", "json", "txt"];
 
   let link = $state("");
   let loading = $state(false);
@@ -12,6 +17,9 @@
   let pasteOpen = $state(false);
   let pasteText = $state("");
   let pasteBad = $state<string[]>([]);
+  let dragging = $state(false);
+  /** Chat time at 0:00 of a local video, as typed. */
+  let syncText = $state("");
 
   /** `field` is the input to highlight. An empty row is neither valid nor an error. */
   type Check = { interval: Interval | null; error: string | null; field: "start" | "end" | null };
@@ -30,9 +38,37 @@
 
   const checks = $derived(app.vod ? app.rows.map((r) => check(r, app.vod!.duration)) : []);
   const intervals = $derived(checks.flatMap((c) => (c.interval ? [c.interval] : [])));
+  const syncStart = $derived.by(() => {
+    const log = app.chatLog;
+    if (!log) return null;
+    return log.info.clock ? parseClock(syncText, log.info.start) : parseTime(syncText);
+  });
+  /** A local video without a chat log is cut without chat. */
+  const withChat = $derived(!!app.settings?.chat && (!app.vod?.local || !!app.chatLog));
   const ready = $derived(
-    !!app.vod && intervals.length > 0 && checks.every((c) => !c.error) && !app.running,
+    !!app.vod &&
+      intervals.length > 0 &&
+      checks.every((c) => !c.error) &&
+      !(withChat && app.vod.local && syncStart === null) &&
+      !app.running,
   );
+
+  const baseName = (path: string) => path.split(/[\\/]/).pop() ?? path;
+  const extension = (path: string) => baseName(path).split(".").pop()?.toLowerCase() ?? "";
+
+  onMount(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent(({ payload: e }) => {
+      dragging = e.type === "enter" || e.type === "over";
+      if (e.type !== "drop") return;
+      const video = e.paths.find((p) => VIDEO.includes(extension(p)));
+      const log = e.paths.find((p) => CHAT_LOG.includes(extension(p)));
+      // Video first: a chat log belongs to the video dropped with it.
+      (video ? openLocal(video) : Promise.resolve()).then(() => {
+        if (log && app.vod?.local) openChatLog(log);
+      });
+    });
+    return () => unlisten.then((f) => f());
+  });
 
   async function openVod() {
     if (!link.trim()) return;
@@ -40,11 +76,53 @@
     error = null;
     try {
       app.vod = await api.vodInfo(link);
+      app.chatLog = null;
       if (app.rows.length === 0) app.rows = [newRow()];
     } catch (e) {
       error = explain(e);
     } finally {
       loading = false;
+    }
+  }
+
+  async function pickVideo() {
+    const path = await open({ filters: [{ name: "Видео", extensions: VIDEO }] });
+    if (typeof path === "string") await openLocal(path);
+  }
+
+  /** A video from disk; one interval over the whole file if none is typed yet. */
+  async function openLocal(path: string) {
+    loading = true;
+    error = null;
+    try {
+      app.vod = await api.localVideo(path);
+      app.chatLog = null;
+      link = "";
+      if (app.rows.every((r) => !r.start.trim() && !r.end.trim())) {
+        app.rows = [newRow("0:00", formatTime(Math.floor(app.vod.duration)))];
+      }
+    } catch (e) {
+      error = explain(e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function pickChatLog() {
+    const path = await open({ filters: [{ name: "Лог чата", extensions: CHAT_LOG }] });
+    if (typeof path === "string") await openChatLog(path);
+  }
+
+  async function openChatLog(path: string) {
+    error = null;
+    try {
+      const info = await api.chatLogOpen(path);
+      app.chatLog = { path, info };
+      // The file name of an OBS recording tells when it started.
+      const start = info.clock ? (app.vod?.started ?? info.start) : info.start;
+      syncText = info.clock ? formatClock(start) : formatTime(start);
+    } catch (e) {
+      error = explain(e);
     }
   }
 
@@ -73,10 +151,12 @@
     error = null;
     try {
       app.queueVod = app.vod;
+      app.queueChatLog =
+        app.vod.local && app.chatLog && syncStart !== null ? { path: app.chatLog.path, start: syncStart } : null;
       app.queue = intervals.map((interval) => ({ interval, status: { state: "waiting" } }));
       await runJob(
         intervals.map((_, i) => i),
-        s.chat ? $state.snapshot(s.overlay) : null,
+        withChat ? $state.snapshot(s.overlay) : null,
       );
       app.screen = "queue";
     } catch (e) {
@@ -88,7 +168,7 @@
 </script>
 
 <div class="screen">
-  <section class="glass card">
+  <section class="glass card" class:drop={dragging}>
     <h2>Запись</h2>
     <form
       class="link"
@@ -101,7 +181,9 @@
       <button class="btn primary" disabled={loading || !link.trim()}>
         {loading ? "Открываем…" : "Открыть"}
       </button>
+      <button type="button" class="btn" disabled={loading} onclick={pickVideo}>Файл…</button>
     </form>
+    <p class="dim hint">Ссылка на запись Twitch или видеофайл с диска, его можно перетащить в окно вместе с логом чата.</p>
     {#if error}
       <p class="error" title={error.detail}>{error.text}</p>
     {/if}
@@ -113,9 +195,37 @@
         {/if}
         <div>
           <div class="title">{app.vod.title}</div>
-          <div class="dim">{app.vod.channel} · {formatTime(app.vod.duration)}</div>
+          <div class="dim">
+            {app.vod.local ? "Файл с диска" : app.vod.channel} · {formatTime(Math.floor(app.vod.duration))}
+          </div>
         </div>
       </div>
+
+      {#if app.vod.local}
+        <div class="chatlog">
+          <span class="dim">Чат:</span>
+          {#if app.chatLog}
+            <span class="path" title={app.chatLog.path}><bdi>{baseName(app.chatLog.path)}</bdi></span>
+            <span class="dim nowrap">
+              · {app.chatLog.info.count} сообщ.{app.chatLog.info.channel ? ` · ${app.chatLog.info.channel}` : ""}
+            </span>
+          {:else}
+            <span class="dim">лог Chatterino (.log) или TwitchDownloader (.json)</span>
+          {/if}
+          <button class="btn small" onclick={pickChatLog}>{app.chatLog ? "Другой…" : "Выбрать…"}</button>
+        </div>
+        {#if app.chatLog}
+          <div class="sync">
+            <span class="dim">Начало видео в чате</span>
+            <input class="field" class:invalid={syncStart === null} bind:value={syncText} />
+            <span class="dim hint">
+              {app.chatLog.info.clock
+                ? "Дата и время по часам лога. Чат отстаёт — уменьшите, спешит — увеличьте."
+                : "Время записи Twitch, с которого начинается файл."}
+            </span>
+          </div>
+        {/if}
+      {/if}
     {/if}
   </section>
 
@@ -170,7 +280,9 @@
         <label class="toggle">
           <input type="checkbox" bind:checked={app.settings.chat} />
           Чат в кадре
-          {#if app.settings.chat && app.settings.activePreset}
+          {#if app.settings.chat && app.vod.local && !app.chatLog}
+            <span class="dim">· нет лога чата</span>
+          {:else if app.settings.chat && app.settings.activePreset}
             <span class="dim">· {app.settings.activePreset}</span>
           {/if}
         </label>
@@ -204,6 +316,35 @@
     gap: 16px;
     align-items: center;
     margin-top: 16px;
+  }
+
+  .drop {
+    outline: 2px dashed var(--primary);
+    outline-offset: -2px;
+  }
+
+  .hint {
+    font-size: 13px;
+  }
+
+  .chatlog,
+  .sync {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 14px;
+  }
+
+  .chatlog .path {
+    min-width: 0;
+  }
+
+  .sync .field {
+    width: 190px;
+  }
+
+  .nowrap {
+    white-space: nowrap;
   }
 
   .vod img {
