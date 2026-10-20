@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod cut;
+pub mod failure;
 pub mod images;
 pub mod job;
 pub mod overlay;
@@ -9,7 +10,9 @@ pub mod twitch;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use failure::{Failure, Kind};
 use serde::Serialize;
 use image::RgbaImage;
 use tauri::async_runtime::JoinHandle;
@@ -33,14 +36,20 @@ struct AppState {
 
 /// Payload of `clip` events: one per state change or progress tick of a clip.
 #[derive(Clone, Serialize)]
-#[serde(tag = "state", rename_all = "kebab-case")]
+#[serde(tag = "state", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 enum ClipEvent {
     /// Loading the chat and its images.
     Preparing { index: usize },
     Running { index: usize, fraction: f64 },
-    Done { index: usize, path: PathBuf },
-    Failed { index: usize, error: String },
+    /// The connection dropped; the clip starts over after a pause.
+    Retrying { index: usize, attempt: usize },
+    /// `no_chat`: nobody wrote during the clip, so it was cut without the panel.
+    Done { index: usize, path: PathBuf, no_chat: bool },
+    Failed { index: usize, error: Failure },
 }
+
+/// Pauses before cutting a clip again after a network failure; one retry each.
+const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(15)];
 
 fn tools_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("tools"))
@@ -88,9 +97,9 @@ async fn tools_install(app: AppHandle, state: State<'_, AppState>) -> Result<Vec
 }
 
 #[tauri::command]
-async fn vod_info(input: String, state: State<'_, AppState>) -> Result<job::Vod, String> {
-    let id = job::parse_vod_id(&input).ok_or_else(|| "not a Twitch VOD link".to_owned())?;
-    cut::vod_info(&ready_tools(&state)?, &id).await.map_err(|e| e.to_string())
+async fn vod_info(input: String, state: State<'_, AppState>) -> Result<job::Vod, Failure> {
+    let id = job::parse_vod_id(&input).ok_or("not a Twitch VOD link")?;
+    cut::vod_info(&ready_tools(&state)?, &id).await.map_err(|e| Failure::new(e.kind(), e))
 }
 
 /// Settings with `out_dir` filled in when the user has not picked one.
@@ -124,7 +133,7 @@ async fn overlay_preview(
     playlist: Option<String>,
     time: f64,
     style: overlay::OverlayStyle,
-) -> Result<Response, String> {
+) -> Result<Response, Failure> {
     let cached = state.preview_frame.lock().unwrap().clone();
     let frame = match (cached, playlist) {
         (_, None) => Arc::new(RgbaImage::from_fn(1920, 1080, |x, y| {
@@ -134,7 +143,7 @@ async fn overlay_preview(
         (Some((p, t, frame)), Some(playlist)) if p == playlist && t == time => frame,
         (_, Some(playlist)) => {
             let tools = ready_tools(&state)?;
-            let frame = Arc::new(cut::grab_frame(&tools, &playlist, time).await.map_err(|e| e.to_string())?);
+            let frame = Arc::new(cut::grab_frame(&tools, &playlist, time).await.map_err(|e| Failure::new(e.kind(), e))?);
             *state.preview_frame.lock().unwrap() = Some((playlist, time, Arc::clone(&frame)));
             frame
         }
@@ -163,9 +172,9 @@ fn job_start(
     overlay: Option<overlay::OverlayStyle>,
     out_dir: Option<PathBuf>,
     name_template: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     if let Some((i, e)) = job.check().into_iter().next() {
-        return Err(format!("interval {}: {e}", i + 1));
+        return Err(format!("interval {}: {e}", i + 1).into());
     }
     let tools = ready_tools(&state)?;
     let out_dir = match out_dir {
@@ -173,41 +182,49 @@ fn job_start(
         None => default_out_dir(&app)?,
     };
     let template = name_template.unwrap_or_default();
-    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&out_dir)?;
     let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("images");
+    // Without a timeout a request on a dropped connection can hang forever.
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
 
     let mut running = state.job.lock().unwrap();
     if running.as_ref().is_some_and(|h| !h.inner().is_finished()) {
-        return Err("a job is already running".to_owned());
+        return Err("a job is already running".into());
     }
     let task_app = app.clone();
     *running = Some(tauri::async_runtime::spawn(async move {
         let app = task_app;
-        let client = reqwest::Client::new();
         let cache = images::ImageCache::new(cache_dir, client.clone());
         for (index, interval) in job.intervals.iter().enumerate() {
             let _ = app.emit("clip", ClipEvent::Preparing { index });
-            let result = async {
-                let chat = match &overlay {
-                    Some(style) => Some(
-                        cut::load_chat(&client, &cache, &job.vod, interval, style)
-                            .await
-                            .map_err(|e| e.to_string())?,
-                    ),
-                    None => None,
-                };
-                let out = job::clip_path(&out_dir, &template, &job.vod, interval, index + 1);
-                let progress = |fraction| {
-                    let _ = app.emit("clip", ClipEvent::Running { index, fraction });
-                };
-                cut::cut(&tools, &job.vod.playlist, interval, chat, &out, progress)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                Ok::<_, String>(out)
+            let chat = match &overlay {
+                Some(style) => match cut::load_chat(&client, &cache, &job.vod, interval, style).await {
+                    Ok(chat) => Some(chat),
+                    Err(e) => {
+                        let _ = app.emit("clip", ClipEvent::Failed { index, error: Failure::new(Kind::Chat, e) });
+                        continue;
+                    }
+                },
+                None => None,
             };
-            let event = match result.await {
-                Ok(path) => ClipEvent::Done { index, path },
-                Err(error) => ClipEvent::Failed { index, error },
+            // An empty panel would only cover the video.
+            let no_chat = chat.as_ref().is_some_and(|c| c.messages.is_empty());
+            let chat = chat.filter(|c| !c.messages.is_empty());
+            let out = job::clip_path(&out_dir, &template, &job.vod, interval, index + 1);
+            let progress = |fraction| {
+                let _ = app.emit("clip", ClipEvent::Running { index, fraction });
+            };
+            let mut attempt = 0;
+            let event = loop {
+                match cut::cut(&tools, &job.vod.playlist, interval, chat.clone(), &out, progress).await {
+                    Ok(()) => break ClipEvent::Done { index, path: out, no_chat },
+                    Err(e) if e.kind() == Kind::Network && attempt < RETRY_DELAYS.len() => {
+                        let _ = app.emit("clip", ClipEvent::Retrying { index, attempt: attempt + 1 });
+                        tokio::time::sleep(RETRY_DELAYS[attempt]).await;
+                        attempt += 1;
+                    }
+                    Err(e) => break ClipEvent::Failed { index, error: Failure::new(e.kind(), e) },
+                }
             };
             let _ = app.emit("clip", event);
         }

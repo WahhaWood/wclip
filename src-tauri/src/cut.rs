@@ -14,6 +14,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::chat::{self, ChatMessage, Part};
+use crate::failure::{self, Kind};
 use crate::images::ImageCache;
 use crate::job::{Interval, Vod};
 use crate::overlay::{self, Overlay, OverlayStyle};
@@ -21,6 +22,10 @@ use crate::tools::{self, Tools};
 
 const CRF: &str = "18";
 const PRESET: &str = "veryfast";
+
+/// HLS input options: give up on a stalled read after 20 s, retry a failed
+/// segment 3 times before the demuxer skips it.
+const HLS_INPUT: [&str; 4] = ["-rw_timeout", "20000000", "-seg_max_retry", "3"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,6 +35,21 @@ pub enum Error {
     Tool(String),
     #[error("yt-dlp output: {0}")]
     Json(#[from] serde_json::Error),
+    /// The HLS demuxer skips a segment it cannot download and carries on (exit
+    /// code 0), which would leave a hole in the clip.
+    #[error("ffmpeg: {0}")]
+    SegmentSkipped(String),
+}
+
+impl Error {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Error::Io(e) => failure::io_kind(e),
+            Error::Tool(text) => failure::classify(text),
+            Error::Json(_) => Kind::Other,
+            Error::SegmentSkipped(_) => Kind::Network,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -66,6 +86,7 @@ pub async fn vod_info(tools: &Tools, id: &str) -> Result<Vod> {
 }
 
 /// Chat to burn into a clip.
+#[derive(Clone)]
 pub struct ChatOverlay {
     /// Already scaled to the video height.
     pub style: OverlayStyle,
@@ -77,6 +98,7 @@ pub struct ChatOverlay {
 pub async fn grab_frame(tools: &Tools, playlist: &str, t: f64) -> Result<RgbaImage> {
     let out = tokio_command(&tools.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
+        .args(HLS_INPUT)
         .args(["-ss", &t.to_string(), "-i", playlist])
         .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"])
         .output()
@@ -130,7 +152,9 @@ pub async fn cut(
     let length = interval.end - interval.start;
     let part = PartFile(out.with_extension("mp4.part"));
     let mut cmd = tokio_command(&tools.ffmpeg);
-    cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-nostats", "-progress", "pipe:1"])
+    // Warnings too: that is where the demuxer reports a skipped segment.
+    cmd.args(["-hide_banner", "-nostdin", "-loglevel", "level+warning", "-nostats", "-progress", "pipe:1"])
+        .args(HLS_INPUT)
         .args(["-ss", &interval.start.to_string(), "-i", playlist]);
     match &chat {
         Some(chat) => {
@@ -202,8 +226,12 @@ pub async fn cut(
     let (progress, errors, ()) = tokio::join!(read_progress, read_errors, write_frames);
     progress?;
     let status = child.wait().await?;
+    let errors = String::from_utf8_lossy(&errors?).into_owned();
     if !status.success() {
-        return Err(tool_error(&errors?, "ffmpeg"));
+        return Err(Error::Tool(format!("ffmpeg: {}", last_error(&errors))));
+    }
+    if let Some(line) = errors.lines().find(|l| l.contains("failed too many times")) {
+        return Err(Error::SegmentSkipped(strip_level(line)));
     }
     std::fs::rename(&part.0, out)?;
     on_progress(1.0);
@@ -228,6 +256,23 @@ fn tool_error(stderr: &[u8], tool: &str) -> Error {
     let text = String::from_utf8_lossy(stderr);
     let line = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
     Error::Tool(format!("{tool}: {}", line.trim().trim_start_matches("ERROR: ")))
+}
+
+/// Last error line of ffmpeg stderr written with `-loglevel level+...`; the last
+/// line of any level if none is marked as an error.
+fn last_error(stderr: &str) -> String {
+    let lines = || stderr.lines().rev().filter(|l| !l.trim().is_empty());
+    let line = lines()
+        .find(|l| l.contains("[error]") || l.contains("[fatal]"))
+        .or_else(|| lines().next())
+        .unwrap_or("");
+    strip_level(line)
+}
+
+fn strip_level(line: &str) -> String {
+    ["[error] ", "[fatal] ", "[warning] "]
+        .iter()
+        .fold(line.trim().to_owned(), |l, tag| l.replacen(tag, "", 1))
 }
 
 #[cfg(test)]
@@ -381,12 +426,51 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A segment missing from the playlist must fail the clip, not leave a hole.
+    /// Offline, needs only ffmpeg in `PATH`: `cargo test -- --ignored skipped_segment`.
+    #[tokio::test]
+    #[ignore]
+    async fn skipped_segment() {
+        let dir = smoke_dir("skip");
+        let tools = Tools { ffmpeg: "ffmpeg".into(), ffprobe: "ffprobe".into(), yt_dlp: "yt-dlp".into() };
+        let ok = tools::command(&tools.ffmpeg)
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30", "-t", "12"])
+            .args(["-c:v", "libx264", "-g", "30", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod"])
+            .arg(dir.join("v.m3u8"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let playlist = dir.join("v.m3u8").to_string_lossy().into_owned();
+        let interval = Interval { start: 1.0, end: 10.0, name: String::new() };
+
+        let whole = dir.join("whole.mp4");
+        cut(&tools, &playlist, &interval, None, &whole, |_| {}).await.unwrap();
+
+        std::fs::remove_file(dir.join("v2.ts")).unwrap();
+        let out = dir.join("holed.mp4");
+        let err = cut(&tools, &playlist, &interval, None, &out, |_| {}).await.unwrap_err();
+        assert!(matches!(err, Error::SegmentSkipped(_)), "{err}");
+        assert_eq!(err.kind(), Kind::Network);
+        assert!(!out.exists() && !out.with_extension("mp4.part").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ffmpeg_error_line() {
+        let stderr = "[in#0/hls @ 0x5] [warning] Packet corrupt (stream = 0, dts = 1).\n\
+                      [out#0/mp4 @ 0x6] [error] Error writing trailer: No space left on device\n\
+                      [aac @ 0x7] [warning] Qavg: 1.0\n";
+        assert_eq!(last_error(stderr), "[out#0/mp4 @ 0x6] Error writing trailer: No space left on device");
+        assert_eq!(last_error("Unknown encoder 'x'\n\n"), "Unknown encoder 'x'");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn smoke_missing_vod() {
         let dir = std::env::temp_dir();
         let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
-        let err = vod_info(&tools, "1").await.unwrap_err().to_string();
-        assert!(err.contains("does not exist"), "{err}");
+        let err = vod_info(&tools, "1").await.unwrap_err();
+        assert_eq!(err.kind(), Kind::VodMissing, "{err}");
     }
 }

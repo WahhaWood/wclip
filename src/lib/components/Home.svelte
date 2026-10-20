@@ -1,12 +1,13 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, type Interval } from "$lib/api";
-  import { app, newRow, type Row } from "$lib/state.svelte";
+  import { explain } from "$lib/errors";
+  import { app, newRow, runJob, type Row } from "$lib/state.svelte";
   import { formatTime, parseIntervalList, parseTime } from "$lib/time";
 
   let link = $state("");
   let loading = $state(false);
-  let error = $state<string | null>(null);
+  let error = $state<ReturnType<typeof explain> | null>(null);
   let starting = $state(false);
   let pasteOpen = $state(false);
   let pasteText = $state("");
@@ -41,7 +42,7 @@
       app.vod = await api.vodInfo(link);
       if (app.rows.length === 0) app.rows = [newRow()];
     } catch (e) {
-      error = String(e);
+      error = explain(e);
     } finally {
       loading = false;
     }
@@ -71,19 +72,15 @@
     starting = true;
     error = null;
     try {
-      const job = { vod: $state.snapshot(app.vod), intervals };
-      const overlay = s.chat ? $state.snapshot(s.overlay) : null;
-      app.queue = intervals.map((i) => ({
-        name: i.name || `${formatTime(i.start)} – ${formatTime(i.end)}`,
-        start: i.start,
-        end: i.end,
-        status: { state: "waiting" },
-      }));
-      await api.jobStart(job, overlay, s.outDir, s.nameTemplate);
-      app.running = true;
+      app.queueVod = app.vod;
+      app.queue = intervals.map((interval) => ({ interval, status: { state: "waiting" } }));
+      await runJob(
+        intervals.map((_, i) => i),
+        s.chat ? $state.snapshot(s.overlay) : null,
+      );
       app.screen = "queue";
     } catch (e) {
-      error = String(e);
+      error = explain(e);
     } finally {
       starting = false;
     }
@@ -106,7 +103,7 @@
       </button>
     </form>
     {#if error}
-      <p class="error">{error}</p>
+      <p class="error" title={error.detail}>{error.text}</p>
     {/if}
 
     {#if app.vod}

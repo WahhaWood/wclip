@@ -2,6 +2,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
   import { api, type Corner, type Settings } from "$lib/api";
+  import { explain } from "$lib/errors";
   import { app } from "$lib/state.svelte";
   import { parseTime } from "$lib/time";
 
@@ -52,7 +53,7 @@
         preview = URL.createObjectURL(new Blob([png], { type: "image/png" }));
         previewError = null;
       } catch (e) {
-        if (mine === seq) previewError = String(e);
+        if (mine === seq) previewError = explain(e).text;
       } finally {
         if (mine === seq) previewing = false;
       }

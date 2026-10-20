@@ -39,11 +39,16 @@ export type Settings = {
   presets: Preset[];
 };
 
+export type FailureKind = "vod-missing" | "sub-only" | "network" | "disk-full" | "chat" | "other";
+/** Error of commands and failed clips; turn it into words with `explain` (errors.ts). */
+export type Failure = { kind: FailureKind; detail: string };
+
 export type ClipEvent =
   | { state: "preparing"; index: number }
   | { state: "running"; index: number; fraction: number }
-  | { state: "done"; index: number; path: string }
-  | { state: "failed"; index: number; error: string };
+  | { state: "retrying"; index: number; attempt: number }
+  | { state: "done"; index: number; path: string; noChat: boolean }
+  | { state: "failed"; index: number; error: Failure };
 
 export const api = {
   toolsStatus: () => invoke<ToolInfo[]>("tools_status"),

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{CLIENT_ID, Error, GQL_URL, GqlError, Result};
+use super::{Error, GqlError, Result};
 
 const COMMENTS_HASH: &str = "b70a3591ff0f4e0313d126c6a1502d79a1c02baebb288227c582044aa76adf6a";
 
@@ -111,16 +111,7 @@ async fn fetch_page(client: &reqwest::Client, video_id: &str, offset: u32) -> Re
         "variables": { "videoID": video_id, "contentOffsetSeconds": offset },
         "extensions": { "persistedQuery": { "version": 1, "sha256Hash": COMMENTS_HASH } },
     }]);
-    let responses: Vec<Response> = client
-        .post(GQL_URL)
-        .header("Client-ID", CLIENT_ID)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    parse_page(responses)
+    parse_page(super::post(client, &body).await?)
 }
 
 fn parse_page(mut responses: Vec<Response>) -> Result<Page> {

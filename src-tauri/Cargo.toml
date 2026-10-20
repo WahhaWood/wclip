@@ -29,7 +29,7 @@ tiny-skia = "0.12"
 fontdb = "0.23"
 unicode-script = "0.5"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
-tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt"] }
+tokio = { version = "1", features = ["process", "io-util", "macros", "sync", "rt", "time"] }
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]

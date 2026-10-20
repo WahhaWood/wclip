@@ -1,7 +1,8 @@
 <script lang="ts">
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { api } from "$lib/api";
-  import { app } from "$lib/state.svelte";
+  import { explain } from "$lib/errors";
+  import { app, runJob } from "$lib/state.svelte";
   import { formatTime } from "$lib/time";
 
   const done = $derived(app.queue.filter((q) => q.status.state === "done").length);
@@ -9,12 +10,27 @@
     app.queue.findLast((q) => q.status.state === "done")?.status as { path: string } | undefined,
   );
 
+  /** Clips that failed only because the chat did not load. */
+  const chatFailed = $derived(
+    app.queue.flatMap((q, i) => (q.status.state === "failed" && q.status.error.kind === "chat" ? [i] : [])),
+  );
+  let error = $state<ReturnType<typeof explain> | null>(null);
+
+  async function withoutChat() {
+    error = null;
+    try {
+      await runJob(chatFailed, null);
+    } catch (e) {
+      error = explain(e);
+    }
+  }
+
   async function cancel() {
     await api.jobCancel();
     app.running = false;
     for (const q of app.queue) {
       if (q.status.state !== "done" && q.status.state !== "failed") {
-        q.status = { state: "failed", error: "Отменено" };
+        q.status = { state: "failed", error: { kind: "other", detail: "Отменено" } };
       }
     }
   }
@@ -29,21 +45,25 @@
   <ul>
     {#each app.queue as item, i (i)}
       {@const s = item.status}
+      {@const { start, end, name } = item.interval}
+      {@const failure = s.state === "failed" ? explain(s.error) : null}
       <li>
         <div class="row">
-          <span class="name">{item.name}</span>
-          <span class="dim">{formatTime(item.start)} – {formatTime(item.end)}</span>
-          <span class="state" class:error={s.state === "failed"} title={s.state === "failed" ? s.error : undefined}>
+          <span class="name">{name || `${formatTime(start)} – ${formatTime(end)}`}</span>
+          <span class="dim">{formatTime(start)} – {formatTime(end)}</span>
+          <span class="state" class:error={!!failure} title={failure ? (failure.detail ?? failure.text) : undefined}>
             {#if s.state === "waiting"}
               <span class="dim">Ожидает</span>
             {:else if s.state === "preparing"}
               <span class="dim">Загружаем чат…</span>
             {:else if s.state === "running"}
               {Math.round(s.fraction * 100)}%
+            {:else if s.state === "retrying"}
+              <span class="dim">Связь прервалась, повтор {s.attempt}…</span>
             {:else if s.state === "done"}
-              Готово
+              Готово{#if s.noChat}<span class="dim"> · без чата: в отрезке нет сообщений</span>{/if}
             {:else}
-              {s.error}
+              {failure?.text}
             {/if}
           </span>
         </div>
@@ -56,7 +76,14 @@
     {/each}
   </ul>
 
+  {#if error}
+    <p class="error" title={error.detail}>{error.text}</p>
+  {/if}
+
   <div class="actions">
+    {#if !app.running && chatFailed.length > 0}
+      <button class="btn" onclick={withoutChat}>Нарезать без чата ({chatFailed.length})</button>
+    {/if}
     {#if app.running}
       <button class="btn" onclick={cancel}>Отменить</button>
     {:else}
@@ -102,6 +129,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .state.error {
+    white-space: normal;
   }
 
   .actions {
