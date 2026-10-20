@@ -1,0 +1,29 @@
+name: Ошибка
+description: Что-то работает не так
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+      description: Что делали, что ожидали и что получили.
+    validations:
+      required: true
+  - type: input
+    id: vod
+    attributes:
+      label: Ссылка на запись
+      placeholder: https://www.twitch.tv/videos/...
+  - type: input
+    id: version
+    attributes:
+      label: Версия WClip и ОС
+      placeholder: 0.1.0, Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Журнал
+      description: Текст ошибки или журнал, если есть.
+      render: text

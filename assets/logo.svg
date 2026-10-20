@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2A1766"/><stop offset="1" stop-color="#081A38"/>
+    </linearGradient>
+    <radialGradient id="cyan" cx="38" cy="40" r="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3FD0FF"/><stop offset="1" stop-color="#3FD0FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="violet" cx="72" cy="70" r="26" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C05CFF"/><stop offset="1" stop-color="#C05CFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="34" y1="34" x2="74" y2="74" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".8"/>
+      <stop offset=".5" stop-color="#fff" stop-opacity=".1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity=".45"/>
+    </linearGradient>
+  </defs>
+  <rect width="108" height="108" rx="24" fill="url(#bg)"/>
+  <rect width="108" height="108" rx="24" fill="url(#cyan)"/>
+  <rect width="108" height="108" rx="24" fill="url(#violet)"/>
+  <path d="M47,33h14a14,14 0 0 1 14,14v14a14,14 0 0 1 -14,14h-14a14,14 0 0 1 -14,-14v-14a14,14 0 0 1 14,-14z"
+        fill="#fff" fill-opacity=".16" stroke="url(#rim)" stroke-width="1.3"/>
+  <path d="M41.82,45.59L47.91,62.41L54,49.07L60.09,62.41L66.18,45.59"
+        fill="none" stroke="#fff" stroke-width="5.22" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

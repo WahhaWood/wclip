@@ -1,0 +1,43 @@
+/* Theme tokens (WTube look). Screens use only these variables. */
+:root {
+  --seed: #8ecae6;
+  --bg-top: #2a1766;
+  --bg-bottom: #081a38;
+  --glow-cyan: #3fd0ff;
+  --glow-violet: #c05cff;
+  --text: #eef4ff;
+  --text-dim: rgba(238, 244, 255, 0.64);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --radius: 20px;
+  --font: Inter, "Segoe UI", system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font);
+  color: var(--text);
+  background:
+    radial-gradient(circle at 15% 10%, color-mix(in srgb, var(--glow-cyan) 22%, transparent), transparent 45%),
+    radial-gradient(circle at 85% 90%, color-mix(in srgb, var(--glow-violet) 22%, transparent), transparent 45%),
+    linear-gradient(160deg, var(--bg-top), var(--bg-bottom));
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(24px) saturate(140%);
+}

@@ -1,0 +1,57 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches app version
+        run: test "v$(node -p "require('./src-tauri/tauri.conf.json').version")" = "$GITHUB_REF_NAME"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential file libxdo-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - run: npm ci
+      - run: npm run tauri build -- --bundles appimage
+      - run: cp src-tauri/target/release/bundle/appimage/*.AppImage WClip-linux-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: WClip-linux-x86_64.AppImage }
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - run: npm ci
+      # Portable exe only: the installers are not shipped.
+      - run: npm run tauri build -- --no-bundle
+      - run: copy src-tauri\target\release\wclip.exe WClip-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: WClip-windows-x64.exe }
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { merge-multiple: true }
+      # The in-app updater verifies downloads against this file.
+      - run: sha256sum WClip-* > SHA256SUMS
+      - run: gh release create "$GITHUB_REF_NAME" WClip-* SHA256SUMS --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
