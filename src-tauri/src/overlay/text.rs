@@ -18,7 +18,8 @@ use tiny_skia::{IntSize, Pixmap, PixmapPaint, PremultipliedColorU8, Transform};
 
 use crate::chat::{ChatMessage, Part};
 
-const FONT_FAMILY: &str = "Inter";
+/// Embedded default font; placeholders always use it, whatever the text font.
+pub const FONT_FAMILY: &str = "Inter";
 const EMOJI_FAMILY: &str = "Twemoji Mozilla";
 const PLACEHOLDER: &str = "M";
 
@@ -83,17 +84,28 @@ impl Typesetter {
         Self { fonts, cache: SwashCache::new(), placeholder_em, scaled: HashMap::new() }
     }
 
-    /// Message laid out to `width` pixels; images missing from `images` (failed
-    /// downloads) fall back to the emote name as text, or no badge.
+    /// Font families available for text: embedded ones and the system's.
+    pub fn families(&self) -> Vec<String> {
+        let mut out: Vec<String> =
+            self.fonts.db().faces().filter_map(|f| f.families.first().map(|(name, _)| name.clone())).collect();
+        out.sort_unstable_by_key(|f| f.to_lowercase());
+        out.dedup();
+        out
+    }
+
+    /// Message laid out to `width` pixels in `family` (missing glyphs fall back to
+    /// other fonts); images missing from `images` (failed downloads) fall back to
+    /// the emote name as text, or no badge.
     pub fn render(
         &mut self,
         msg: &ChatMessage,
         images: &HashMap<String, RgbaImage>,
+        family: &str,
         font_size: f32,
         width: u32,
     ) -> Pixmap {
         let text_metrics = Metrics::new(font_size, (font_size * LINE_HEIGHT).round());
-        let base = Attrs::new().family(Family::Name(FONT_FAMILY)).color(Color::rgba(255, 255, 255, 255));
+        let base = Attrs::new().family(Family::Name(family)).color(Color::rgba(255, 255, 255, 255));
         let mut slots: Vec<Slot> = Vec::new();
         let mut spans: Vec<(String, Attrs)> = Vec::new();
 

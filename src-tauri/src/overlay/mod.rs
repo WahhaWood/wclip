@@ -29,13 +29,15 @@ pub enum Corner {
 
 /// Overlay preset. Sizes are pixels at 1080p and scale with the video height.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct OverlayStyle {
     pub corner: Corner,
     pub width: u32,
     pub height: u32,
     /// Distance from the video edges.
     pub margin: u32,
+    /// Font family for text; emoji and missing glyphs fall back to other fonts.
+    pub font: String,
     pub font_size: f32,
     /// Panel background opacity, 0..=1.
     pub background: f32,
@@ -50,6 +52,7 @@ impl Default for OverlayStyle {
             width: 440,
             height: 520,
             margin: 24,
+            font: text::FONT_FAMILY.to_owned(),
             font_size: 22.0,
             background: 0.0,
             lifetime: 0.0,
@@ -81,6 +84,19 @@ impl OverlayStyle {
             Corner::TopLeft => (left, top),
             Corner::TopRight => (right, top),
             Corner::BottomLeft => (left, bottom),
+            Corner::BottomRight => (right, bottom),
+        }
+    }
+
+    /// Top-left corner of the panel on a `video_w` x `video_h` frame.
+    pub fn offset(&self, video_w: u32, video_h: u32) -> (i64, i64) {
+        let m = i64::from(self.margin);
+        let right = i64::from(video_w) - i64::from(self.width) - m;
+        let bottom = i64::from(video_h) - i64::from(self.height) - m;
+        match self.corner {
+            Corner::TopLeft => (m, m),
+            Corner::TopRight => (right, m),
+            Corner::BottomLeft => (m, bottom),
             Corner::BottomRight => (right, bottom),
         }
     }
@@ -136,12 +152,12 @@ impl Overlay {
     pub fn frame(&mut self, t: f64) -> Arc<Vec<u8>> {
         let pad = Self::padding(&self.style);
         let width = self.style.width - 2 * pad as u32;
-        let (messages, images, font_size) = (&self.messages, &self.images, self.style.font_size);
+        let (messages, images, style) = (&self.messages, &self.images, &self.style);
         let (blocks, typesetter) = (&mut self.blocks, &mut self.typesetter);
         let placed = self.feed.at(t, |i| {
             blocks
                 .entry(i)
-                .or_insert_with(|| typesetter.render(&messages[i], images, font_size, width))
+                .or_insert_with(|| typesetter.render(&messages[i], images, &style.font, style.font_size, width))
                 .height() as f32
         });
 
@@ -166,6 +182,45 @@ impl Overlay {
         self.last = Some((placed, Arc::clone(&buf)));
         buf
     }
+}
+
+/// `frame` with the overlay in `style` (unscaled) on top, filled with made-up
+/// messages: settings preview without loading any chat.
+pub fn preview(frame: &RgbaImage, style: &OverlayStyle) -> RgbaImage {
+    let style = style.scaled(frame.height());
+    let (x, y) = style.offset(frame.width(), frame.height());
+    let (w, h) = (style.width, style.height);
+    let messages = sample_messages();
+    let t = messages.last().map_or(0.0, |m| m.time) + 1.0;
+    let mut overlay = Overlay::new(style, messages, HashMap::new());
+    let panel = RgbaImage::from_raw(w, h, overlay.frame(t).to_vec()).expect("frame size");
+    let mut out = frame.clone();
+    image::imageops::overlay(&mut out, &panel, x, y);
+    out
+}
+
+fn sample_messages() -> Vec<ChatMessage> {
+    use crate::chat::Part;
+    [
+        ("Nightbot", [0x8A, 0x2B, 0xE2], "Welcome to the stream! 👋"),
+        ("kotik_42", [0xFF, 0x69, 0xB4], "привет чат"),
+        ("SpeedRunner", [0x1E, 0x90, 0xFF], "that jump was frame perfect, no way 😮"),
+        ("mira", [0x9A, 0xCD, 0x32], "GG"),
+        ("Ленивец", [0xDA, 0xA5, 0x20], "ставлю лайк, ждём хайлайты 🔥"),
+        ("pixel_pusher", [0xFF, 0x45, 0x00], "who else is watching this at 3am"),
+        ("Zed", [0x00, 0xFF, 0x7F], "LUL"),
+        ("quiet_viewer", [0x5F, 0x9E, 0xA0], "first time here, the chat overlay looks clean"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (name, color, text))| ChatMessage {
+        time: i as f64,
+        name: name.into(),
+        color,
+        badges: Vec::new(),
+        parts: vec![Part::Text(text.into())],
+    })
+    .collect()
 }
 
 fn demultiply(premultiplied: &[u8]) -> Vec<u8> {

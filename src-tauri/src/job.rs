@@ -70,12 +70,25 @@ impl Job {
     }
 }
 
-/// Free output path for the clip: the interval name, or `<channel>_<vod>_<HH-MM-SS>`,
-/// with ` (2)`, ` (3)`… appended if the file exists.
-pub fn clip_path(dir: &Path, vod: &Vod, interval: &Interval) -> PathBuf {
+/// File name template used when an interval has no name of its own.
+pub const DEFAULT_TEMPLATE: &str = "{channel}_{vod}_{start}";
+
+/// Free output path for clip number `n` (from 1): the interval name, or `template`
+/// with `{channel}`, `{vod}`, `{start}`, `{end}` (`HH-MM-SS`) and `{n}` filled in;
+/// ` (2)`, ` (3)`… is appended if the file exists.
+pub fn clip_path(dir: &Path, template: &str, vod: &Vod, interval: &Interval, n: usize) -> PathBuf {
+    let hms = |t: f64| {
+        let s = t as u64;
+        format!("{:02}-{:02}-{:02}", s / 3600, s / 60 % 60, s % 60)
+    };
+    let template = if template.trim().is_empty() { DEFAULT_TEMPLATE } else { template };
     let base = if interval.name.trim().is_empty() {
-        let s = interval.start as u64;
-        format!("{}_{}_{:02}-{:02}-{:02}", vod.channel, vod.id, s / 3600, s / 60 % 60, s % 60)
+        template
+            .replace("{channel}", &vod.channel)
+            .replace("{vod}", &vod.id)
+            .replace("{start}", &hms(interval.start))
+            .replace("{end}", &hms(interval.end))
+            .replace("{n}", &n.to_string())
     } else {
         interval.name.trim().to_owned()
     };
@@ -83,11 +96,11 @@ pub fn clip_path(dir: &Path, vod: &Vod, interval: &Interval) -> PathBuf {
         .chars()
         .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
         .collect();
-    let base = base.trim_end_matches(['.', ' ']);
+    let base = base.trim().trim_end_matches('.');
     (1..)
-        .map(|n| match n {
+        .map(|k| match k {
             1 => dir.join(format!("{base}.mp4")),
-            n => dir.join(format!("{base} ({n}).mp4")),
+            k => dir.join(format!("{base} ({k}).mp4")),
         })
         .find(|p| !p.exists())
         .expect("unbounded")
@@ -175,12 +188,14 @@ mod tests {
         let mut job = job(&[(3725.0, 3800.0)]);
         job.vod.channel = "chan".into();
         let iv = &mut job.intervals[0];
-        assert_eq!(clip_path(&dir, &job.vod, iv), dir.join("chan_1_01-02-05.mp4"));
+        assert_eq!(clip_path(&dir, "", &job.vod, iv, 1), dir.join("chan_1_01-02-05.mp4"));
+        let custom = "{n}. {channel} {start}-{end}";
+        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 3), dir.join("3. chan 01-02-05-01-03-20.mp4"));
 
         iv.name = " a/b: c? ".into();
-        assert_eq!(clip_path(&dir, &job.vod, iv), dir.join("a_b_ c_.mp4"));
+        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1), dir.join("a_b_ c_.mp4"));
         std::fs::write(dir.join("a_b_ c_.mp4"), b"").unwrap();
-        assert_eq!(clip_path(&dir, &job.vod, iv), dir.join("a_b_ c_ (2).mp4"));
+        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1), dir.join("a_b_ c_ (2).mp4"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -8,6 +8,7 @@
   --text: #eef4ff;
   --text-dim: rgba(238, 244, 255, 0.64);
   --danger: #ff8a9a;
+  --field-bg: rgba(0, 0, 0, 0.18);
   --glass: rgba(255, 255, 255, 0.07);
   --glass-border: rgba(255, 255, 255, 0.14);
   --radius: 20px;
@@ -41,4 +42,102 @@ body {
   border: 1px solid var(--glass-border);
   border-radius: var(--radius);
   backdrop-filter: blur(24px) saturate(140%);
+}
+
+/* Shared controls. */
+.card {
+  padding: 20px 24px;
+}
+
+.btn {
+  padding: 9px 18px;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  background: var(--glass);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--seed) 14%, transparent);
+}
+
+.btn.primary {
+  background: color-mix(in srgb, var(--seed) 28%, transparent);
+  border-color: color-mix(in srgb, var(--seed) 50%, transparent);
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--seed) 40%, transparent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn.small {
+  padding: 5px 12px;
+  font-size: 13px;
+}
+
+.field {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  background: var(--field-bg);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.field:focus {
+  border-color: color-mix(in srgb, var(--seed) 70%, transparent);
+}
+
+.field.invalid {
+  border-color: var(--danger);
+}
+
+select.field option {
+  background: var(--bg-bottom);
+}
+
+.dim {
+  color: var(--text-dim);
+}
+
+.error {
+  color: var(--danger);
+}
+
+.bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--glass);
+  overflow: hidden;
+}
+
+.bar > div {
+  height: 100%;
+  background: linear-gradient(90deg, var(--glow-cyan), var(--glow-violet));
+  transition: width 0.2s;
+}
+
+.bar.done > div {
+  background: var(--seed);
+}
+
+.bar.failed > div {
+  background: var(--danger);
+}
+
+h2 {
+  margin: 0 0 14px;
+  font-size: 18px;
+  font-weight: 600;
 }

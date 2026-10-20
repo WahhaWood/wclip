@@ -73,6 +73,22 @@ pub struct ChatOverlay {
     pub images: HashMap<String, RgbaImage>,
 }
 
+/// Video frame at VOD time `t`, for the overlay preview.
+pub async fn grab_frame(tools: &Tools, playlist: &str, t: f64) -> Result<RgbaImage> {
+    let out = tokio_command(&tools.ffmpeg)
+        .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
+        .args(["-ss", &t.to_string(), "-i", playlist])
+        .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"])
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Err(tool_error(&out.stderr, "ffmpeg"));
+    }
+    image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Png)
+        .map(|img| img.to_rgba8())
+        .map_err(|e| Error::Tool(format!("ffmpeg frame: {e}")))
+}
+
 /// Loads the chat shown during `interval` (with lookback, so the panel starts
 /// filled) and every badge and emote image in it. Images that fail to load are
 /// left out; the renderer falls back to text for them.
