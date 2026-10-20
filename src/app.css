@@ -1,3 +1,15 @@
+@font-face {
+  font-family: Inter;
+  font-weight: 400;
+  src: url("/fonts/Inter-Regular.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: Inter;
+  font-weight: 600 700;
+  src: url("/fonts/Inter-Bold.ttf") format("truetype");
+}
+
 /* Theme tokens (WTube look). Screens use only these variables. */
 :root {
   --seed: #8ecae6;

@@ -176,7 +176,8 @@
         </label>
         <div class="out">
           <span class="dim">Папка:</span>
-          <span class="path" title={app.settings.outDir}>{app.settings.outDir}</span>
+          <!-- rtl clips the start of a long path; bdi keeps the path itself left-to-right. -->
+          <span class="path" title={app.settings.outDir}><bdi>{app.settings.outDir}</bdi></span>
           <button class="btn small" onclick={chooseDir}>Изменить</button>
         </div>
         <button class="btn primary" disabled={!ready || starting} onclick={start}>

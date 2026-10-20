@@ -9,6 +9,7 @@ export type Row = { id: number; start: string; end: string; name: string };
 
 export type ClipState =
   | { state: "waiting" }
+  | { state: "preparing" }
   | { state: "running"; fraction: number }
   | { state: "done"; path: string }
   | { state: "failed"; error: string };
@@ -46,12 +47,8 @@ export async function initApp() {
   await listen<ClipEvent>("clip", ({ payload: e }) => {
     const item = app.queue[e.index];
     if (!item) return;
-    item.status =
-      e.state === "running"
-        ? { state: "running", fraction: e.fraction }
-        : e.state === "done"
-          ? { state: "done", path: e.path }
-          : { state: "failed", error: e.error };
+    const { index: _, ...status } = e;
+    item.status = status;
   });
   await listen("job-done", () => {
     app.running = false;

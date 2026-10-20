@@ -40,6 +40,7 @@ export type Settings = {
 };
 
 export type ClipEvent =
+  | { state: "preparing"; index: number }
   | { state: "running"; index: number; fraction: number }
   | { state: "done"; index: number; path: string }
   | { state: "failed"; index: number; error: string };

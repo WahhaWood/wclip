@@ -36,13 +36,15 @@
   }
 
   const mb = (bytes: number) => (bytes / 1e6).toFixed(0);
+  // Rough download sizes, MB.
+  const estimate = $derived(units.reduce((sum, u) => sum + (u === "ffmpeg" ? 200 : 40), 0));
 </script>
 
 <main>
   <section class="glass card setup">
     <img src="/logo.svg" width="96" height="96" alt="WClip" />
     <h1>WClip</h1>
-    <p class="dim">Для работы нужны ffmpeg и yt-dlp. WClip скачает их один раз, около 200 МБ.</p>
+    <p class="dim">Для работы нужны ffmpeg и yt-dlp. WClip скачает недостающее один раз, около {estimate} МБ.</p>
 
     <ul class="units">
       {#each units as unit (unit)}

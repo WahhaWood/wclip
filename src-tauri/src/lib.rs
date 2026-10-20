@@ -35,6 +35,8 @@ struct AppState {
 #[derive(Clone, Serialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 enum ClipEvent {
+    /// Loading the chat and its images.
+    Preparing { index: usize },
     Running { index: usize, fraction: f64 },
     Done { index: usize, path: PathBuf },
     Failed { index: usize, error: String },
@@ -48,8 +50,16 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app.path().app_config_dir().map_err(|e| e.to_string())?.join("settings.json"))
 }
 
+/// `<Videos>/WClip`. Without an XDG videos dir (common on Linux) it falls back to
+/// Downloads, then `~/Videos`.
 fn default_out_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().video_dir().map_err(|e| e.to_string())?.join("WClip"))
+    let p = app.path();
+    let base = p
+        .video_dir()
+        .or_else(|_| p.download_dir())
+        .or_else(|_| p.home_dir().map(|h| h.join("Videos")))
+        .map_err(|e| e.to_string())?;
+    Ok(base.join("WClip"))
 }
 
 fn ready_tools(state: &AppState) -> Result<tools::Tools, String> {
@@ -176,7 +186,7 @@ fn job_start(
         let client = reqwest::Client::new();
         let cache = images::ImageCache::new(cache_dir, client.clone());
         for (index, interval) in job.intervals.iter().enumerate() {
-            let _ = app.emit("clip", ClipEvent::Running { index, fraction: 0.0 });
+            let _ = app.emit("clip", ClipEvent::Preparing { index });
             let result = async {
                 let chat = match &overlay {
                     Some(style) => Some(

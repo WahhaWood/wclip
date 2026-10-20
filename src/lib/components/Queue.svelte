@@ -13,7 +13,7 @@
     await api.jobCancel();
     app.running = false;
     for (const q of app.queue) {
-      if (q.status.state === "running" || q.status.state === "waiting") {
+      if (q.status.state !== "done" && q.status.state !== "failed") {
         q.status = { state: "failed", error: "Отменено" };
       }
     }
@@ -36,6 +36,8 @@
           <span class="state" class:error={s.state === "failed"} title={s.state === "failed" ? s.error : undefined}>
             {#if s.state === "waiting"}
               <span class="dim">Ожидает</span>
+            {:else if s.state === "preparing"}
+              <span class="dim">Загружаем чат…</span>
             {:else if s.state === "running"}
               {Math.round(s.fraction * 100)}%
             {:else if s.state === "done"}
@@ -47,7 +49,7 @@
         </div>
         <div class="bar" class:done={s.state === "done"} class:failed={s.state === "failed"}>
           <div
-            style:width="{s.state === 'running' ? s.fraction * 100 : s.state === 'waiting' ? 0 : 100}%"
+            style:width="{s.state === 'running' ? s.fraction * 100 : s.state === 'done' || s.state === 'failed' ? 100 : 0}%"
           ></div>
         </div>
       </li>
