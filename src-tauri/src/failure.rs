@@ -8,6 +8,8 @@ pub enum Kind {
     /// Deleted, private or never existed: Twitch answers the same for all three.
     VodMissing,
     SubOnly,
+    /// Twitch refused the token from the settings: stale or mistyped.
+    BadToken,
     Network,
     DiskFull,
     /// The chat could not be loaded; the clip can still be cut without it.
@@ -74,6 +76,10 @@ pub fn classify(text: &str) -> Kind {
         Kind::VodMissing
     } else if text.contains("subscriber-only") {
         Kind::SubOnly
+    } else if text.contains("http error 401") {
+        // Only a request with the token gets it; before the network check, which
+        // matches "unable to download" in the same message.
+        Kind::BadToken
     } else if text.contains("no space left on device") {
         Kind::DiskFull
     } else if NETWORK.iter().any(|p| text.contains(p)) {
@@ -95,6 +101,8 @@ mod tests {
                 "yt-dlp: [twitch:vod] v2: You must be logged into an account that has access to this subscriber-only content",
                 Kind::SubOnly,
             ),
+            ("yt-dlp: [twitch:vod] 2: Your account does not have access to this subscriber-only content", Kind::SubOnly),
+            ("yt-dlp: [twitch:vod] 2: Unable to download JSON metadata: HTTP Error 401: Unauthorized (caused by <HTTPError 401: Unauthorized>)", Kind::BadToken),
             ("yt-dlp: [twitch:vod] v2: Unable to download JSON metadata: <urlopen error [Errno -3] Temporary failure in name resolution>", Kind::Network),
             ("ffmpeg: [out#0/mp4 @ 0x5] Error writing trailer: No space left on device", Kind::DiskFull),
             ("ffmpeg: [tls @ 0x5] Error in the pull function.", Kind::Network),

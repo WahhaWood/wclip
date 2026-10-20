@@ -28,6 +28,15 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
 }
 
+/// A new file only its owner can read on Unix; fails if `path` exists.
+pub(crate) fn private_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
 /// A cached preview frame: (playlist, VOD time, JPEG).
 type PreviewFrame = (String, f64, Arc<Vec<u8>>);
 
@@ -188,9 +197,10 @@ async fn tools_install(app: AppHandle, state: State<'_, AppState>) -> Result<Vec
 }
 
 #[tauri::command]
-async fn vod_info(input: String, state: State<'_, AppState>) -> Result<job::Vod, Failure> {
+async fn vod_info(app: AppHandle, input: String, state: State<'_, AppState>) -> Result<job::Vod, Failure> {
     let id = job::parse_vod_id(&input).ok_or("not a Twitch VOD link")?;
-    cut::vod_info(&ready_tools(&state)?, &id).await.map_err(|e| log("vod", Failure::new(e.kind(), e)))
+    let token = settings::load(&settings_path(&app)?).twitch_token.filter(|t| !t.trim().is_empty());
+    cut::vod_info(&ready_tools(&state)?, &id, token.as_deref()).await.map_err(|e| log("vod", Failure::new(e.kind(), e)))
 }
 
 /// A video file on disk, to cut instead of a VOD.

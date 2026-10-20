@@ -11,8 +11,9 @@ use serde_json::json;
 
 use crate::failure::Kind;
 
-/// Public web client id used by twitch.tv itself (same as TwitchDownloader).
-const CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+/// Public web client id used by twitch.tv itself (same as TwitchDownloader); the
+/// `auth-token` cookie of the site only works with it.
+pub const CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
 const GQL_URL: &str = "https://gql.twitch.tv/gql";
 
 #[derive(Debug, thiserror::Error)]

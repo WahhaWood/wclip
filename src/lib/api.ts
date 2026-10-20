@@ -73,13 +73,15 @@ export type Settings = {
   /** Also join the clips of a job into one video. */
   merge: boolean;
   chatFilter: ChatFilter;
+  /** Value of the `auth-token` cookie of twitch.tv, for subscriber-only VODs. */
+  twitchToken: string | null;
 };
 
 /** A release newer than the running app; `installable` false means linking to `page`. */
 export type UpdateInfo = { version: string; notes: string; page: string; installable: boolean };
 export type UpdateProgress = { done: number; total: number | null };
 
-export type FailureKind = "vod-missing" | "sub-only" | "network" | "disk-full" | "chat" | "other";
+export type FailureKind = "vod-missing" | "sub-only" | "bad-token" | "network" | "disk-full" | "chat" | "other";
 /** Error of commands and failed clips; turn it into words with `explain` (errors.ts). */
 export type Failure = { kind: FailureKind; detail: string };
 

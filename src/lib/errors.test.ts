@@ -13,3 +13,8 @@ test("explain passes other errors through", () => {
   assert.deepEqual(explain({ kind: "other", detail: "boom" }), { text: "boom", detail: null });
   assert.deepEqual(explain("plain"), { text: "plain", detail: null });
 });
+
+test("explain tells a stale token from a missing one", () => {
+  assert.match(explain({ kind: "bad-token", detail: "HTTP Error 401" }).text, /не принял токен/);
+  assert.match(explain({ kind: "sub-only", detail: "" }).text, /токен Twitch в настройках/);
+});

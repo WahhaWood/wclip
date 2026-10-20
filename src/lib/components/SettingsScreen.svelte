@@ -18,6 +18,7 @@
   let panel = $state<string | null>(null);
   let panelError = $state<string | null>(null);
   let presetName = $state("");
+  let showToken = $state(false);
 
   const GPUS: Encoder[] = ["nvenc", "qsv", "amf", "vaapi"];
   const ENCODERS: Record<Encoder, string> = {
@@ -515,6 +516,27 @@
         <p class="dim hint">
           Если у интервала нет своего имени. Подстановки: {"{channel}"} — канал, {"{vod}"} — номер
           записи (у файла с диска — его имя), {"{start}"} и {"{end}"} — время, {"{n}"} — номер клипа.
+        </p>
+      </div>
+      <span>Токен Twitch</span>
+      <div>
+        <div class="line">
+          <input
+            class="field"
+            type={showToken ? "text" : "password"}
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Не задан"
+            value={s.twitchToken ?? ""}
+            oninput={(e) => (s.twitchToken = e.currentTarget.value.trim() || null)}
+          />
+          <button class="btn" onclick={() => (showToken = !showToken)}>{showToken ? "Скрыть" : "Показать"}</button>
+        </div>
+        <p class="dim hint">
+          Нужен только для записей «для подписчиков», аккаунт должен иметь к ним доступ. Это значение cookie
+          <code>auth-token</code>: в браузере, где вы вошли в Twitch, откройте twitch.tv, нажмите F12 → «Хранилище»
+          (Firefox) или Application (Chrome) → Cookies → twitch.tv. Токен даёт доступ к аккаунту: он хранится только на
+          этом компьютере, никому его не передавайте. После выхода из аккаунта в браузере он перестаёт работать.
         </p>
       </div>
       <span>Обновления</span>

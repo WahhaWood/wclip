@@ -5,6 +5,7 @@
 //! temporary download is needed.
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -41,6 +42,9 @@ pub enum Error {
     /// code 0), which would leave a hole in the clip.
     #[error("ffmpeg: {0}")]
     SegmentSkipped(String),
+    /// Not a cookie value: only letters and digits fit the cookie file.
+    #[error("the Twitch token is not a cookie value")]
+    BadToken,
 }
 
 impl Error {
@@ -50,6 +54,7 @@ impl Error {
             Error::Tool(text) => failure::classify(text),
             Error::Json(_) => Kind::Other,
             Error::SegmentSkipped(_) => Kind::Network,
+            Error::BadToken => Kind::BadToken,
         }
     }
 }
@@ -66,12 +71,26 @@ struct YtDlpInfo {
     height: Option<u32>,
 }
 
-pub async fn vod_info(tools: &Tools, id: &str) -> Result<Vod> {
-    let out = tokio_command(&tools.yt_dlp)
-        .args(["-J", "-f", "b", "--no-warnings", "--no-playlist"])
-        .arg(format!("https://www.twitch.tv/videos/{id}"))
-        .output()
-        .await?;
+/// A subscriber-only VOD is asked for again with `token`, the `auth-token` cookie
+/// of twitch.tv, when there is one. Not before: Twitch refuses even public VODs to
+/// a stale token.
+pub async fn vod_info(tools: &Tools, id: &str, token: Option<&str>) -> Result<Vod> {
+    match (yt_dlp_info(tools, id, None).await, token) {
+        (Err(e), Some(token)) if e.kind() == Kind::SubOnly => yt_dlp_info(tools, id, Some(token)).await,
+        (result, _) => result,
+    }
+}
+
+async fn yt_dlp_info(tools: &Tools, id: &str, token: Option<&str>) -> Result<Vod> {
+    let mut command = tokio_command(&tools.yt_dlp);
+    command.args(["-J", "-f", "b", "--no-warnings", "--no-playlist"]);
+    // Removed when this returns.
+    let cookies = token.map(CookieFile::new).transpose()?;
+    if let Some(cookies) = &cookies {
+        command.arg("--cookies").arg(&cookies.0);
+        command.arg("--extractor-args").arg(format!("twitch:client_id={}", crate::twitch::CLIENT_ID));
+    }
+    let out = command.arg(format!("https://www.twitch.tv/videos/{id}")).output().await?;
     if !out.status.success() {
         return Err(tool_error(&out.stderr, "yt-dlp"));
     }
@@ -87,6 +106,34 @@ pub async fn vod_info(tools: &Tools, id: &str) -> Result<Vod> {
         local: false,
         started: None,
     })
+}
+
+/// The twitch.tv login as a Netscape cookie file for yt-dlp, in the temp dir and
+/// readable by the user only; removed on drop.
+struct CookieFile(PathBuf);
+
+impl CookieFile {
+    fn new(token: &str) -> Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let token = token.trim();
+        if token.is_empty() || !token.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(Error::BadToken);
+        }
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("wclip-cookies-{}-{n}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut file = crate::private_file(&path)?;
+        let cookies = Self(path);
+        // Expires in 2100: yt-dlp may drop session cookies.
+        write!(file, "# Netscape HTTP Cookie File\n.twitch.tv\tTRUE\t/\tTRUE\t4102444800\tauth-token\t{token}\n")?;
+        Ok(cookies)
+    }
+}
+
+impl Drop for CookieFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[derive(Deserialize)]
@@ -439,7 +486,7 @@ mod tests {
         let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
         let client = reqwest::Client::new();
         let cache = ImageCache::new(dir.join("images"), client.clone());
-        let vod = vod_info(&tools, "2905205256").await.unwrap();
+        let vod = vod_info(&tools, "2905205256", None).await.unwrap();
         let interval = Interval { start: 600.0, end: 610.0, name: String::new() };
 
         let started = Instant::now();
@@ -469,7 +516,7 @@ mod tests {
     async fn smoke_overlay_sync() {
         let dir = smoke_dir("sync");
         let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
-        let vod = vod_info(&tools, "2905205256").await.unwrap();
+        let vod = vod_info(&tools, "2905205256", None).await.unwrap();
         let interval = Interval { start: 600.0, end: 604.0, name: String::new() };
         let magenta = image::Rgba([255, 0, 255, 255]);
         let message = ChatMessage {
@@ -571,7 +618,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
 
-        let vod = vod_info(&tools, "2905205256").await.unwrap();
+        let vod = vod_info(&tools, "2905205256", None).await.unwrap();
         assert!(vod.duration > 1000.0);
         let interval = Interval { start: 600.0, end: 630.0, name: String::new() };
         let out = dir.join("clip.mp4");
@@ -596,7 +643,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wclip-cancel-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
-        let vod = vod_info(&tools, "2905205256").await.unwrap();
+        let vod = vod_info(&tools, "2905205256", None).await.unwrap();
         let interval = Interval { start: 600.0, end: 900.0, name: String::new() };
         let out = dir.join("clip.mp4");
         let part = out.with_extension("mp4.part");
@@ -715,7 +762,44 @@ mod tests {
     async fn smoke_missing_vod() {
         let dir = std::env::temp_dir();
         let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
-        let err = vod_info(&tools, "1").await.unwrap_err();
+        let err = vod_info(&tools, "1", None).await.unwrap_err();
         assert_eq!(err.kind(), Kind::VodMissing, "{err}");
+    }
+
+    #[test]
+    fn cookie_file() {
+        let cookies = CookieFile::new(" abc123 ").unwrap();
+        let text = std::fs::read_to_string(&cookies.0).unwrap();
+        assert!(text.ends_with(".twitch.tv\tTRUE\t/\tTRUE\t4102444800\tauth-token\tabc123\n"), "{text}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&cookies.0).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let path = cookies.0.clone();
+        drop(cookies);
+        assert!(!path.exists());
+        for bad in ["", "abc\tdef", "abc\n#", "OAuth abc"] {
+            assert!(matches!(CookieFile::new(bad), Err(Error::BadToken)), "{bad:?}");
+        }
+    }
+
+    /// Subscriber-only VOD of zerator (checked 2026-10-20; may be deleted later)
+    /// without a token and with a wrong one; a public VOD ignores a wrong token.
+    #[tokio::test]
+    #[ignore]
+    async fn smoke_sub_only() {
+        let tools = Tools::from_status(&tools::status(&std::env::temp_dir())).expect("tools in PATH");
+        let wrong = Some("abcdefghijklmnopqrstuvwxyz0123");
+        let err = vod_info(&tools, "2905970151", None).await.unwrap_err();
+        assert_eq!(err.kind(), Kind::SubOnly, "{err}");
+        let err = vod_info(&tools, "2905970151", wrong).await.unwrap_err();
+        assert_eq!(err.kind(), Kind::BadToken, "{err}");
+        vod_info(&tools, "2905205256", wrong).await.unwrap();
+        let leftover = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(&format!("wclip-cookies-{}-", std::process::id())));
+        assert!(!leftover);
     }
 }
