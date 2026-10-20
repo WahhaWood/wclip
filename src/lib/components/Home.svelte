@@ -4,6 +4,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, type Interval } from "$lib/api";
   import { explain } from "$lib/errors";
+  import { copyLayout } from "$lib/layouts";
   import { app, newRow, runJob, type Row } from "$lib/state.svelte";
   import { formatClock, formatTime, parseClock, parseIntervalList, parseTime } from "$lib/time";
   import Frame from "./Frame.svelte";
@@ -85,12 +86,20 @@
     try {
       app.vod = await api.vodInfo(link);
       app.chatLog = null;
+      pickChannelLayout(app.vod.channel);
       if (app.rows.length === 0) app.rows = [newRow()];
     } catch (e) {
       error = explain(e);
     } finally {
       loading = false;
     }
+  }
+
+  /** The layout saved for `channel` last, if any. */
+  function pickChannelLayout(channel: string) {
+    const s = app.settings;
+    const saved = s?.layouts.find((l) => l.name === s.channelLayouts[channel]);
+    if (s && saved) s.layout = copyLayout(saved);
   }
 
   async function pickVideo() {
@@ -327,6 +336,19 @@
             <span class="dim">· {app.settings.activePreset}</span>
           {/if}
         </label>
+        <div class="format">
+          <button class="btn small" class:selected={!app.settings.vertical} onclick={() => app.settings && (app.settings.vertical = false)}>
+            16:9
+          </button>
+          <button class="btn small" class:selected={app.settings.vertical} onclick={() => app.settings && (app.settings.vertical = true)}>
+            9:16
+          </button>
+          {#if app.settings.vertical}
+            <button class="btn small" title="Изменить раскладку" onclick={() => (app.screen = "layout")}>
+              {app.settings.layout.name || "Раскладка"}
+            </button>
+          {/if}
+        </div>
         {#if intervals.length > 1}
           <label class="toggle" title="Клипы останутся и по отдельности">
             <input type="checkbox" bind:checked={app.settings.merge} />
@@ -480,6 +502,11 @@
     display: flex;
     gap: 20px;
     align-items: center;
+  }
+
+  .format {
+    display: flex;
+    gap: 6px;
   }
 
   .toggle {

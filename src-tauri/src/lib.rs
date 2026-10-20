@@ -5,6 +5,7 @@ pub mod errlog;
 pub mod failure;
 pub mod images;
 pub mod job;
+pub mod layout;
 pub mod moments;
 pub mod overlay;
 pub mod settings;
@@ -92,6 +93,8 @@ struct JobOptions {
     /// Also join the clips into one video.
     merge: bool,
     filter: chat::ChatFilter,
+    /// Lay the clips out vertically.
+    layout: Option<layout::Layout>,
 }
 
 /// Chat of a whole video: for finding moments, and cut from without loading again.
@@ -388,7 +391,9 @@ fn job_start(
             }
             _ => None,
         };
-        let overlay = overlay.filter(|_| !job.vod.local || all_messages.is_some());
+        let overlay = overlay
+            .filter(|_| !job.vod.local || all_messages.is_some())
+            .map(|style| cut::clip_style(&style, &job.vod, options.layout.as_ref()));
         let mut video = match options.output.encoder {
             encode::Encoder::Auto => {
                 let gpus = gpu_encoders(&app.state::<AppState>(), &tools, options.output.codec).await;
@@ -401,7 +406,7 @@ fn job_start(
             let _ = app.emit("clip", ClipEvent::Preparing { index });
             let chat = match &overlay {
                 Some(style) => match &all_messages {
-                    Some(Ok(all)) => Ok(Some(cut::chat_from(&cache, &job.vod, interval, style, all).await)),
+                    Some(Ok(all)) => Ok(Some(cut::chat_from(&cache, interval, style, all).await)),
                     Some(Err(e)) => Err(e.clone()),
                     None => cut::load_chat(&client, &cache, &job.vod, interval, style).await.map(Some).map_err(|e| e.to_string()),
                 },
@@ -427,7 +432,7 @@ fn job_start(
             };
             let mut attempt = 0;
             let event = loop {
-                let cut_options = cut::CutOptions { video, chat: options.chat_output };
+                let cut_options = cut::CutOptions { video, chat: options.chat_output, layout: options.layout.clone() };
                 match cut::cut(&tools, &job.vod.playlist, interval, chat.clone(), cut_options, &out, progress).await {
                     Ok(()) => {
                         done.push((out.clone(), interval.clone()));

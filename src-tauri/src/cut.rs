@@ -18,6 +18,7 @@ use crate::encode::Output;
 use crate::failure::{self, Kind};
 use crate::images::{ImageCache, Images};
 use crate::job::{Interval, Vod};
+use crate::layout::Layout;
 use crate::overlay::{self, Overlay, OverlayStyle};
 use crate::tools::{self, Tools};
 
@@ -207,9 +208,22 @@ pub async fn grab_frame(tools: &Tools, playlist: &str, t: f64) -> Result<Vec<u8>
     Ok(out.stdout)
 }
 
+/// The chat style in pixels of the clip: scaled to the video height, or placed
+/// on the canvas of a vertical clip.
+pub fn clip_style(style: &OverlayStyle, vod: &Vod, layout: Option<&Layout>) -> OverlayStyle {
+    match layout {
+        Some(layout) => {
+            let b = layout.chat;
+            let even = |v: u32| v.max(2) & !1;
+            OverlayStyle { x: b.x, y: b.y, width: even(b.width), height: even(b.height), font_size: b.font_size, ..style.clone() }
+        }
+        None => style.scaled(vod.height.unwrap_or(1080)),
+    }
+}
+
 /// Loads the chat shown during `interval` (with lookback, so the panel starts
 /// filled) and every badge and emote image in it. Images that fail to load are
-/// left out; the renderer falls back to text for them.
+/// left out; the renderer falls back to text for them. `style` is from `clip_style`.
 pub async fn load_chat(
     client: &reqwest::Client,
     cache: &ImageCache,
@@ -217,7 +231,7 @@ pub async fn load_chat(
     interval: &Interval,
     style: &OverlayStyle,
 ) -> crate::twitch::Result<ChatOverlay> {
-    let style = style.scaled(vod.height.unwrap_or(1080));
+    let style = style.clone();
     let start = (interval.start - style.lookback()).max(0.0);
     let messages = chat::load(client, &vod.id, start, interval.end, |_| {}).await?;
     Ok(with_images(cache, style, messages).await)
@@ -226,8 +240,8 @@ pub async fn load_chat(
 /// Like `load_chat`, from messages already loaded: a chat log (`chat::from_log`) or
 /// the whole VOD's chat. Lookback may reach before the video: the chat went on
 /// before the recording started.
-pub async fn chat_from(cache: &ImageCache, vod: &Vod, interval: &Interval, style: &OverlayStyle, all: &[ChatMessage]) -> ChatOverlay {
-    let style = style.scaled(vod.height.unwrap_or(1080));
+pub async fn chat_from(cache: &ImageCache, interval: &Interval, style: &OverlayStyle, all: &[ChatMessage]) -> ChatOverlay {
+    let style = style.clone();
     let start = interval.start - style.lookback();
     let messages = all.iter().filter(|m| m.time >= start && m.time < interval.end).cloned().collect();
     with_images(cache, style, messages).await
@@ -260,11 +274,13 @@ pub enum ChatOutput {
     Both,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CutOptions {
     /// `Encoder::Auto` encodes on the CPU; resolve it first (`encode::resolve`).
     pub video: Output,
     pub chat: ChatOutput,
+    /// A vertical clip laid out so; the chat style is then in canvas pixels.
+    pub layout: Option<Layout>,
 }
 
 /// The chat of clip `out` as its own video: ProRes 4444 keeps the transparency and
@@ -296,6 +312,10 @@ pub async fn cut(
         .args(&video.global)
         .args(input_args(playlist))
         .args(["-ss", &interval.start.to_string(), "-i", playlist]);
+    let (layout, main) = match &options.layout {
+        Some(layout) => (format!("{};", layout.graph("main")), "[main]"),
+        None => (String::new(), "[0:v]"),
+    };
     let graph = match &chat {
         Some(chat) => {
             let (w, h) = (chat.style.width, chat.style.height);
@@ -304,14 +324,14 @@ pub async fn cut(
                 .args(["-framerate", &overlay::FPS.to_string(), "-i", "pipe:0"])
                 .stdin(Stdio::piped());
             if burn {
-                format!("[0:v][1:v]overlay=x={x}:y={y}:eof_action=repeat,{}[v]", video.filter)
+                format!("{layout}{main}[1:v]overlay=x={x}:y={y}:eof_action=repeat,{}[v]", video.filter)
             } else {
-                format!("[0:v]{}[v]", video.filter)
+                format!("{layout}{main}{}[v]", video.filter)
             }
         }
         None => {
             cmd.stdin(Stdio::null());
-            format!("[0:v]{}[v]", video.filter)
+            format!("{layout}{main}{}[v]", video.filter)
         }
     };
     cmd.args(["-filter_complex", &graph, "-map", "[v]", "-map", "0:a:0?", "-t", &length.to_string()])
@@ -490,7 +510,7 @@ mod tests {
         let interval = Interval { start: 600.0, end: 610.0, name: String::new() };
 
         let started = Instant::now();
-        let chat = load_chat(&client, &cache, &vod, &interval, &OverlayStyle::default()).await.unwrap();
+        let chat = load_chat(&client, &cache, &vod, &interval, &clip_style(&OverlayStyle::default(), &vod, None)).await.unwrap();
         println!("chat: {} messages, {} images ({} animated), {:?}", chat.messages.len(), chat.images.stills.len(), chat.images.animations.len(), started.elapsed());
 
         let out = dir.join("clip.mp4");
@@ -590,7 +610,7 @@ mod tests {
         let interval = Interval { start: 1.0, end: 5.0, name: String::new() };
         let style = OverlayStyle { lifetime: 10.0, ..OverlayStyle::default() };
         let cache = ImageCache::new(dir.join("images"), reqwest::Client::new());
-        let chat = chat_from(&cache, &vod, &interval, &style, &all).await;
+        let chat = chat_from(&cache, &interval, &clip_style(&style, &vod, None), &all).await;
         assert_eq!(chat.messages.len(), 1, "the early one is out of lookback");
         let (x, y, w, h) = (chat.style.x, chat.style.y, chat.style.width, chat.style.height);
         let out = dir.join("clip.mp4");
@@ -727,12 +747,12 @@ mod tests {
         };
         let style = OverlayStyle::default().scaled(720);
         let chat = ChatOverlay { style: style.clone(), messages: vec![message], images: Images::default() };
-        let options = CutOptions { video, chat: ChatOutput::Both };
+        let options = CutOptions { video, chat: ChatOutput::Both, layout: None };
         let playlist = source.to_string_lossy().into_owned();
         let (a, b) = (dir.join("a.mp4"), dir.join("b.mp4"));
         for (out, start) in [(&a, 0.5), (&b, 3.0)] {
             let interval = Interval { start, end: start + 2.0, name: String::new() };
-            cut(&tools, &playlist, &interval, Some(chat.clone()), options, out, |_| {}).await.unwrap();
+            cut(&tools, &playlist, &interval, Some(chat.clone()), options.clone(), out, |_| {}).await.unwrap();
         }
         let chat_file = chat_path(&a);
         // ProRes 4444 decodes as 12 bit whatever it was encoded from.
@@ -746,6 +766,96 @@ mod tests {
         let duration: f64 = probe(&tools, &merged, "format=duration").parse().unwrap();
         assert!((duration - 4.0).abs() < 0.1, "merged {duration}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A vertical clip of a blue frame with a red top-right quadrant, the quadrant
+    /// on top and the chat below it; offline, ffmpeg from `PATH`:
+    /// `cargo test -- --ignored smoke_vertical --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn smoke_vertical() {
+        use crate::layout::{self, Area, ChatBox, Piece};
+        let dir = smoke_dir("vertical");
+        let tools = Tools { ffmpeg: "ffmpeg".into(), ffprobe: "ffprobe".into(), yt_dlp: "yt-dlp".into() };
+        let source = dir.join("source.mp4");
+        let ok = tools::command(&tools.ffmpeg)
+            .args(["-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=1280x720:r=30:d=4,drawbox=x=640:y=0:w=640:h=360:color=red:t=fill"])
+            .args(["-f", "lavfi", "-i", "sine=d=4", "-c:v", "libx264", "-c:a", "aac", "-shortest"])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let cam = Piece { name: "cam".into(), src: Area { x: 0.5, y: 0.0, w: 0.5, h: 0.5 }, x: 0, y: 0, width: 1080 };
+        let chat_box = ChatBox { x: 40, y: 1200, width: 600, height: 400, font_size: 30.0 };
+        let layout = layout::Layout { pieces: vec![cam], chat: chat_box, ..layout::Layout::default() };
+        let vod = Vod {
+            id: String::new(),
+            title: String::new(),
+            channel: String::new(),
+            duration: 4.0,
+            thumbnail: None,
+            playlist: String::new(),
+            height: Some(720),
+            local: true,
+            started: None,
+        };
+        let style = clip_style(&OverlayStyle { background: 1.0, ..OverlayStyle::default() }, &vod, Some(&layout));
+        assert_eq!((style.x, style.y, style.width, style.height, style.font_size), (40, 1200, 600, 400, 30.0));
+        let message =
+            ChatMessage { time: 0.5, name: "alice".into(), color: [255, 255, 255], badges: Vec::new(), parts: vec![Part::Text("hi".into())] };
+        let chat = ChatOverlay { style, messages: vec![message], images: Images::default() };
+        let options = CutOptions { layout: Some(layout), ..CutOptions::default() };
+        let out = dir.join("vertical.mp4");
+        let interval = Interval { start: 1.0, end: 3.0, name: String::new() };
+        cut(&tools, &source.to_string_lossy(), &interval, Some(chat), options, &out, |_| {}).await.unwrap();
+        assert_eq!(probe(&tools, &out, "stream=width,height").lines().next().unwrap(), "1080,1920");
+        let img = frame_at(&tools, &out, 1.0);
+        let px = |x, y| img.get_pixel(x, y).0;
+        let red = |p: [u8; 4]| p[0] > 200 && p[1] < 60 && p[2] < 60;
+        // The quadrant is 640x360, so 1080x608 on the canvas.
+        assert!(red(px(540, 300)) && red(px(10, 590)), "{:?} {:?}", px(540, 300), px(10, 590));
+        assert!(!red(px(540, 640)), "{:?}", px(540, 640));
+        // The panel background is opaque black; the blurred frame around it is bluish.
+        let p = px(300, 1500);
+        assert!(p[0] < 30 && p[1] < 30 && p[2] < 30, "panel {p:?}");
+        let p = px(900, 1800);
+        assert!(p[2] > 120, "background {p:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 20 s of a real VOD laid out "camera on top, game below" with chat, on the CPU
+    /// and on each GPU encoder found; prints the time and keeps a frame of each:
+    /// `cargo test --release -- --ignored smoke_vertical_vod --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn smoke_vertical_vod() {
+        use crate::layout::{Area, ChatBox, Layout, Piece};
+        let dir = smoke_dir("vertical-vod");
+        let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
+        let vod = vod_info(&tools, "2905205256", None).await.unwrap();
+        let game = Piece { name: "game".into(), src: Area { x: 0.15, y: 0.0, w: 0.7, h: 1.0 }, x: 0, y: 608, width: 1080 };
+        let cam = Piece { name: "cam".into(), src: Area { x: 0.74, y: 0.0, w: 0.26, h: 0.26 }, x: 0, y: 0, width: 1080 };
+        let chat_box = ChatBox { x: 40, y: 1490, width: 1000, height: 400, font_size: 30.0 };
+        let layout = Layout { pieces: vec![game, cam], chat: chat_box, ..Layout::default() };
+        let interval = Interval { start: 600.0, end: 620.0, name: String::new() };
+        let cache = ImageCache::new(dir.join("images"), reqwest::Client::new());
+        let style = clip_style(&OverlayStyle::default(), &vod, Some(&layout));
+        let chat = load_chat(&reqwest::Client::new(), &cache, &vod, &interval, &style).await.unwrap();
+        let mut encoders = vec![Output::default()];
+        for gpu in crate::encode::available(&tools, crate::encode::Codec::H264).await {
+            encoders.push(Output { encoder: gpu, ..Output::default() });
+        }
+        for video in encoders {
+            let out = dir.join(format!("{:?}.mp4", video.encoder));
+            let options = CutOptions { video, layout: Some(layout.clone()), ..CutOptions::default() };
+            let started = Instant::now();
+            cut(&tools, &vod.playlist, &interval, Some(chat.clone()), options, &out, |_| {}).await.unwrap();
+            println!("{:?}: 20 s in {:.1} s", video.encoder, started.elapsed().as_secs_f64());
+            assert_eq!(probe(&tools, &out, "stream=width,height").lines().next().unwrap(), "1080,1920");
+            frame_at(&tools, &out, 10.0).save(out.with_extension("png")).unwrap();
+        }
+        println!("frames in {}", dir.display());
     }
 
     #[test]

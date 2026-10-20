@@ -16,7 +16,7 @@ import {
 } from "./api";
 import { formatTime } from "./time";
 
-export type Screen = "home" | "queue" | "settings";
+export type Screen = "home" | "queue" | "layout" | "settings";
 
 /** An interval row as typed; times stay text until the job starts. */
 export type Row = { id: number; start: string; end: string; name: string };
@@ -109,7 +109,13 @@ export async function runJob(items: number[], overlay: OverlayStyle | null, merg
     intervals: items.map((i) => $state.snapshot(app.queue[i].interval)),
     chat_log: $state.snapshot(app.queueChatLog),
   };
-  const options = { output: $state.snapshot(s.output), chatOutput: s.chatOutput, merge, filter: $state.snapshot(s.chatFilter) };
+  const options = {
+    output: $state.snapshot(s.output),
+    chatOutput: s.chatOutput,
+    merge,
+    filter: $state.snapshot(s.chatFilter),
+    layout: s.vertical ? $state.snapshot(s.layout) : null,
+  };
   for (const i of items) app.queue[i].status = { state: "waiting" };
   app.jobItems = items;
   await api.jobStart(job, overlay, s.outDir, s.nameTemplate, options);

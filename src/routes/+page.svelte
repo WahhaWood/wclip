@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, type ToolInfo } from "$lib/api";
   import Home from "$lib/components/Home.svelte";
+  import LayoutEditor from "$lib/components/LayoutEditor.svelte";
   import Queue from "$lib/components/Queue.svelte";
   import SettingsScreen from "$lib/components/SettingsScreen.svelte";
   import ToolsSetup from "$lib/components/ToolsSetup.svelte";
@@ -32,6 +33,7 @@
   const tabs = $derived<[Screen, string][]>([
     ["home", "Нарезка"],
     ...(app.queue.length ? [["queue", app.running ? "Очередь ●" : "Очередь"] as [Screen, string]] : []),
+    ...(app.settings?.vertical ? [["layout", "Вертикаль"] as [Screen, string]] : []),
     ["settings", "Настройки"],
   ]);
 </script>
@@ -63,6 +65,8 @@
         <Home />
       {:else if app.screen === "queue"}
         <Queue />
+      {:else if app.screen === "layout"}
+        <LayoutEditor />
       {:else}
         <SettingsScreen />
       {/if}

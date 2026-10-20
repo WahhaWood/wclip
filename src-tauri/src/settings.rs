@@ -1,5 +1,6 @@
 //! User settings and overlay presets, kept as JSON in the app config directory.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use crate::chat::ChatFilter;
 use crate::cut::ChatOutput;
 use crate::encode::Output;
 use crate::job::DEFAULT_TEMPLATE;
+use crate::layout::Layout;
 use crate::overlay::OverlayStyle;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +33,13 @@ pub struct Settings {
     pub chat_filter: ChatFilter,
     /// Value of the `auth-token` cookie of twitch.tv, for subscriber-only VODs.
     pub twitch_token: Option<String>,
+    /// Cut vertical clips laid out by `layout`.
+    pub vertical: bool,
+    pub layout: Layout,
+    /// Saved layouts.
+    pub layouts: Vec<Layout>,
+    /// Name of the saved layout picked last for a channel: a streamer keeps the camera in one place.
+    pub channel_layouts: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +63,10 @@ impl Default for Settings {
             merge: false,
             chat_filter: ChatFilter::default(),
             twitch_token: None,
+            vertical: false,
+            layout: Layout::default(),
+            layouts: Vec::new(),
+            channel_layouts: HashMap::new(),
         }
     }
 }

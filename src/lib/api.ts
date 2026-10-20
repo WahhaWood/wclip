@@ -51,6 +51,15 @@ export type ChatFilter = { hideBots: boolean; bots: string[]; hideCommands: bool
 
 export type Preset = { name: string; style: OverlayStyle };
 
+/** Part of the source frame, as fractions of its width and height. */
+export type Area = { x: number; y: number; w: number; h: number };
+/** A part of the source on the 1080x1920 canvas; its height follows the proportions of `src`. */
+export type Piece = { name: string; src: Area; x: number; y: number; width: number };
+/** The chat panel on the canvas, in canvas pixels. */
+export type ChatBox = { x: number; y: number; width: number; height: number; fontSize: number };
+/** A vertical clip (see src-tauri/src/layout.rs); `pieces` bottom first. */
+export type Layout = { name: string; pieces: Piece[]; blur: boolean; color: [number, number, number]; chat: ChatBox };
+
 /** `auto`: the first GPU encoder that works, else `cpu` (libx264 / libx265). */
 export type Encoder = "auto" | "cpu" | "nvenc" | "qsv" | "amf" | "vaapi";
 export type Codec = "h264" | "hevc";
@@ -58,7 +67,14 @@ export type Quality = "high" | "medium" | "small";
 export type Output = { encoder: Encoder; codec: Codec; quality: Quality };
 /** `file`: the chat as its own video with transparency (ProRes 4444 `.chat.mov`). */
 export type ChatOutput = "burn" | "file" | "both";
-export type JobOptions = { output: Output; chatOutput: ChatOutput; merge: boolean; filter: ChatFilter };
+export type JobOptions = {
+  output: Output;
+  chatOutput: ChatOutput;
+  merge: boolean;
+  filter: ChatFilter;
+  /** Lay the clips out vertically. */
+  layout: Layout | null;
+};
 export type Settings = {
   outDir: string | null;
   nameTemplate: string;
@@ -75,6 +91,13 @@ export type Settings = {
   chatFilter: ChatFilter;
   /** Value of the `auth-token` cookie of twitch.tv, for subscriber-only VODs. */
   twitchToken: string | null;
+  /** Cut vertical clips laid out by `layout`. */
+  vertical: boolean;
+  layout: Layout;
+  /** Saved layouts. */
+  layouts: Layout[];
+  /** Name of the saved layout picked last for a channel. */
+  channelLayouts: Record<string, string>;
 };
 
 /** A release newer than the running app; `installable` false means linking to `page`. */
