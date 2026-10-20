@@ -255,6 +255,39 @@ mod tests {
         assert!(!a.peaks.is_empty());
     }
 
+    /// Peaks of a chat log against the same hour of VOD 2905205256 from GQL, e.g. a
+    /// TwitchDownloader JSON of its first hour:
+    /// `WCLIP_LOG=<file> cargo test --release -- --ignored smoke_moments_log --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn smoke_moments_log() {
+        let client = reqwest::Client::new();
+        let path = std::path::PathBuf::from(std::env::var("WCLIP_LOG").expect("WCLIP_LOG"));
+        let started = std::time::Instant::now();
+        let log = crate::chat::log::open(&path).unwrap();
+        println!("{:?}, read in {:.1} s", log.info, started.elapsed().as_secs_f64());
+        let from_log = crate::chat::from_log(&client, &log, log.info.start).await;
+        let from_vod = crate::chat::load(&client, "2905205256", 0.0, 3600.0, |_| {}).await.unwrap();
+        println!("{} messages from the log, {} from the VOD", from_log.len(), from_vod.len());
+        let (a, b) = (activity(&from_log, 3600.0, ""), activity(&from_vod, 3600.0, ""));
+        for (p, q) in a.peaks.iter().zip(&b.peaks) {
+            println!("log {:>5.0}-{:<5.0} {:>4} {:?}", p.start, p.end, p.count, p.words);
+            println!("vod {:>5.0}-{:<5.0} {:>4} {:?}", q.start, q.end, q.count, q.words);
+        }
+        // Both sources miss a few messages of the densest seconds, differently from
+        // run to run (checked 2026-10-20): a burst's edge or rank can move.
+        let by_time = |a: &Activity| {
+            let mut peaks = a.peaks.clone();
+            peaks.sort_by(|p, q| p.start.total_cmp(&q.start));
+            peaks
+        };
+        let (a, b) = (by_time(&a), by_time(&b));
+        assert_eq!(a.len(), b.len());
+        for (p, q) in a.iter().zip(&b) {
+            assert!((p.start - q.start).abs() <= STEP && (p.end - q.end).abs() <= STEP, "{p:?} {q:?}");
+        }
+    }
+
     #[test]
     fn outside_video_dropped() {
         let all = vec![msg(-5.0, "early"), msg(1.0, "in"), msg(100.0, "late")];
