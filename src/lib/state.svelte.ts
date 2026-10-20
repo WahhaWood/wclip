@@ -2,6 +2,7 @@
 import { listen } from "@tauri-apps/api/event";
 import {
   api,
+  type Caption,
   type ChatLogInfo,
   type ChatLogRef,
   type ClipEvent,
@@ -18,18 +19,23 @@ import { formatTime } from "./time";
 
 export type Screen = "home" | "queue" | "layout" | "settings";
 
-/** An interval row as typed; times stay text until the job starts. */
-export type Row = { id: number; start: string; end: string; name: string };
+/**
+ * An interval row as typed; times stay text until the job starts. `captions` are
+ * the edited subtitles of the interval `captionsFor` (`start|end`), stale once it changes.
+ */
+export type Row = { id: number; start: string; end: string; name: string; captions: Caption[] | null; captionsFor: string | null };
 
 export type ClipState =
   | { state: "waiting" }
   | { state: "preparing" }
+  | { state: "transcribing"; fraction: number }
   | { state: "running"; fraction: number }
   | { state: "retrying"; attempt: number }
   | { state: "done"; path: string; noChat: boolean }
   | { state: "failed"; error: Failure };
 
-export type QueueItem = { interval: Interval; status: ClipState };
+/** `captions`: edited subtitles, else transcribed while cutting. */
+export type QueueItem = { interval: Interval; status: ClipState; captions: Caption[] | null };
 
 /** Chat of the whole video, for finding moments. */
 export type ChatState =
@@ -50,6 +56,8 @@ let nextRow = 1;
 
 export const app = $state({
   screen: "home" as Screen,
+  /** Whether the speech model is downloaded; `null` until asked. */
+  speechModel: null as boolean | null,
   settings: null as Settings | null,
   vod: null as Vod | null,
   /** Chat log picked for a local video. */
@@ -72,7 +80,7 @@ export const app = $state({
 });
 
 export function newRow(start = "", end = "", name = ""): Row {
-  return { id: nextRow++, start, end, name };
+  return { id: nextRow++, start, end, name, captions: null, captionsFor: null };
 }
 
 /** Adds an interval row after the filled ones, dropping empty rows. */
@@ -108,6 +116,7 @@ export async function runJob(items: number[], overlay: OverlayStyle | null, merg
     vod: $state.snapshot(app.queueVod),
     intervals: items.map((i) => $state.snapshot(app.queue[i].interval)),
     chat_log: $state.snapshot(app.queueChatLog),
+    captions: items.map((i) => $state.snapshot(app.queue[i].captions)),
   };
   const options = {
     output: $state.snapshot(s.output),
@@ -115,6 +124,8 @@ export async function runJob(items: number[], overlay: OverlayStyle | null, merg
     merge,
     filter: $state.snapshot(s.chatFilter),
     layout: s.vertical ? $state.snapshot(s.layout) : null,
+    subtitles: s.subtitles ? $state.snapshot(s.subtitleStyle) : null,
+    language: s.speechLanguage,
   };
   for (const i of items) app.queue[i].status = { state: "waiting" };
   app.jobItems = items;

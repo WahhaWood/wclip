@@ -29,6 +29,8 @@ export const PRESETS: Layout[] = [
     blur: true,
     color: [0, 0, 0],
     chat: chat(1490, 400),
+    // On the seam between the camera and the game.
+    subtitlesY: 0.32,
   },
   {
     name: "Кадр целиком, размытый фон",
@@ -36,6 +38,7 @@ export const PRESETS: Layout[] = [
     blur: true,
     color: [0, 0, 0],
     chat: chat(1300, 560),
+    subtitlesY: 0.25,
   },
   {
     name: "Середина кадра",
@@ -43,6 +46,7 @@ export const PRESETS: Layout[] = [
     blur: true,
     color: [0, 0, 0],
     chat: chat(1220, 560),
+    subtitlesY: 0.55,
   },
 ];
 

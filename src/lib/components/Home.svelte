@@ -2,11 +2,12 @@
   import { onMount } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, type Interval } from "$lib/api";
+  import { api, type Caption, type Interval } from "$lib/api";
   import { explain } from "$lib/errors";
   import { copyLayout } from "$lib/layouts";
   import { app, newRow, runJob, type Row } from "$lib/state.svelte";
   import { formatClock, formatTime, parseClock, parseIntervalList, parseTime } from "$lib/time";
+  import Captions from "./Captions.svelte";
   import Frame from "./Frame.svelte";
   import Moments from "./Moments.svelte";
 
@@ -26,6 +27,8 @@
   let syncText = $state("");
   /** Row whose start and end frames are shown. */
   let editing = $state<number | null>(null);
+  /** Row whose subtitles text is shown. */
+  let texting = $state<number | null>(null);
 
   /** `field` is the input to highlight. An empty row is neither valid nor an error. */
   type Check = { interval: Interval | null; error: string | null; field: "start" | "end" | null };
@@ -168,6 +171,14 @@
     if (typeof dir === "string") app.settings.outDir = dir;
   }
 
+  /** Key of `interval` for `Row.captionsFor`. */
+  const captionsKey = (interval: Interval) => `${interval.start}|${interval.end}`;
+
+  /** The row's edited captions, if they are for its current times. */
+  function captionsOf(row: Row, interval: Interval): Caption[] | null {
+    return row.captions && row.captionsFor === captionsKey(interval) ? $state.snapshot(row.captions) : null;
+  }
+
   async function start() {
     const s = app.settings;
     if (!app.vod || !s) return;
@@ -176,7 +187,10 @@
     try {
       app.queueVod = app.vod;
       app.queueChatLog = chatLogRef;
-      app.queue = intervals.map((interval) => ({ interval, status: { state: "waiting" } }));
+      app.queue = app.rows.flatMap((row, i) => {
+        const interval = checks[i]?.interval;
+        return interval ? [{ interval, status: { state: "waiting" as const }, captions: captionsOf(row, interval) }] : [];
+      });
       app.merge = null;
       await runJob(
         intervals.map((_, i) => i),
@@ -283,7 +297,8 @@
 
       <div class="rows">
         <div class="row header dim">
-          <span>№</span><span>Начало</span><span>Конец</span><span>Длина</span><span>Имя клипа</span><span></span><span></span>
+          <span>№</span><span>Начало</span><span>Конец</span><span>Длина</span><span>Имя клипа</span><span></span><span
+          ></span><span></span>
         </div>
         {#each app.rows as row, i (row.id)}
           {@const c = checks[i]}
@@ -300,10 +315,24 @@
               disabled={!c?.interval}
               onclick={() => (editing = editing === row.id ? null : row.id)}>Кадры</button
             >
+            {#if app.settings?.subtitles}
+              <button
+                class="btn small"
+                class:selected={texting === row.id}
+                title="Распознать речь и поправить текст субтитров"
+                disabled={!c?.interval}
+                onclick={() => (texting = texting === row.id ? null : row.id)}>Текст</button
+              >
+            {:else}
+              <span></span>
+            {/if}
             <button class="btn small" title="Удалить" onclick={() => app.rows.splice(i, 1)}>✕</button>
           </div>
           {#if c?.error}
             <p class="error row-error">{c.error}</p>
+          {/if}
+          {#if texting === row.id && c?.interval && app.settings?.subtitles}
+            <Captions {row} interval={c.interval} />
           {/if}
           {#if editing === row.id && c?.interval}
             <div class="frames">
@@ -335,6 +364,10 @@
           {:else if app.settings.chat && app.settings.activePreset}
             <span class="dim">· {app.settings.activePreset}</span>
           {/if}
+        </label>
+        <label class="toggle" title="Речь стримера текстом в кадре">
+          <input type="checkbox" bind:checked={app.settings.subtitles} />
+          Субтитры
         </label>
         <div class="format">
           <button class="btn small" class:selected={!app.settings.vertical} onclick={() => app.settings && (app.settings.vertical = false)}>
@@ -457,7 +490,7 @@
 
   .row {
     display: grid;
-    grid-template-columns: 28px 120px 120px 72px 1fr auto auto;
+    grid-template-columns: 28px 120px 120px 72px 1fr auto auto auto;
     gap: 10px;
     align-items: center;
   }
@@ -500,7 +533,8 @@
 
   .footer {
     display: flex;
-    gap: 20px;
+    flex-wrap: wrap;
+    gap: 14px 20px;
     align-items: center;
   }
 
@@ -519,7 +553,7 @@
 
   .out {
     flex: 1;
-    min-width: 0;
+    min-width: 260px;
     display: flex;
     gap: 8px;
     align-items: center;

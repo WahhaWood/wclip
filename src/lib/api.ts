@@ -30,7 +30,25 @@ export type Peak = { start: number; end: number; count: number; words: [string, 
 export type Activity = { bar: number; counts: number[]; total: number; peaks: Peak[] };
 
 export type Interval = { start: number; end: number; name: string };
-export type Job = { vod: Vod; intervals: Interval[]; chat_log: ChatLogRef | null };
+/** `captions`: edited captions by interval; `null` ones are transcribed while cutting. */
+export type Job = { vod: Vod; intervals: Interval[]; chat_log: ChatLogRef | null; captions: (Caption[] | null)[] };
+
+/** A caption on screen, seconds of the clip; `words` are when each word of `text` starts. */
+export type Caption = { start: number; end: number; text: string; words: number[] };
+/** Sizes are pixels on a frame whose short side is 1080; `y` is for 16:9 clips. */
+export type SubtitleStyle = {
+  font: string;
+  size: number;
+  color: [number, number, number];
+  /** The word being said. */
+  highlight: [number, number, number];
+  outline: number;
+  uppercase: boolean;
+  /** Most words in a caption. */
+  words: number;
+  /** Height of the caption's middle, a fraction of the frame. */
+  y: number;
+};
 
 /** Positions and sizes are pixels at 1080p; (x, y) is the panel's top-left corner. */
 export type OverlayStyle = {
@@ -58,7 +76,15 @@ export type Piece = { name: string; src: Area; x: number; y: number; width: numb
 /** The chat panel on the canvas, in canvas pixels. */
 export type ChatBox = { x: number; y: number; width: number; height: number; fontSize: number };
 /** A vertical clip (see src-tauri/src/layout.rs); `pieces` bottom first. */
-export type Layout = { name: string; pieces: Piece[]; blur: boolean; color: [number, number, number]; chat: ChatBox };
+export type Layout = {
+  name: string;
+  pieces: Piece[];
+  blur: boolean;
+  color: [number, number, number];
+  chat: ChatBox;
+  /** Height of the subtitles' middle, a fraction of the canvas. */
+  subtitlesY: number;
+};
 
 /** `auto`: the first GPU encoder that works, else `cpu` (libx264 / libx265). */
 export type Encoder = "auto" | "cpu" | "nvenc" | "qsv" | "amf" | "vaapi";
@@ -74,6 +100,10 @@ export type JobOptions = {
   filter: ChatFilter;
   /** Lay the clips out vertically. */
   layout: Layout | null;
+  /** Burn in subtitles of the speech so. */
+  subtitles: SubtitleStyle | null;
+  /** Language of the speech, like "ru"; `null` detects it. */
+  language: string | null;
 };
 export type Settings = {
   outDir: string | null;
@@ -98,18 +128,24 @@ export type Settings = {
   layouts: Layout[];
   /** Name of the saved layout picked last for a channel. */
   channelLayouts: Record<string, string>;
+  /** Burn in subtitles of the speech. */
+  subtitles: boolean;
+  subtitleStyle: SubtitleStyle;
+  /** Like "ru"; `null` detects the language. */
+  speechLanguage: string | null;
 };
 
 /** A release newer than the running app; `installable` false means linking to `page`. */
 export type UpdateInfo = { version: string; notes: string; page: string; installable: boolean };
 export type UpdateProgress = { done: number; total: number | null };
 
-export type FailureKind = "vod-missing" | "sub-only" | "bad-token" | "network" | "disk-full" | "chat" | "other";
+export type FailureKind = "vod-missing" | "sub-only" | "bad-token" | "no-model" | "network" | "disk-full" | "chat" | "other";
 /** Error of commands and failed clips; turn it into words with `explain` (errors.ts). */
 export type Failure = { kind: FailureKind; detail: string };
 
 export type ClipEvent =
   | { state: "preparing"; index: number }
+  | { state: "transcribing"; index: number; fraction: number }
   | { state: "running"; index: number; fraction: number }
   | { state: "retrying"; index: number; attempt: number }
   | { state: "done"; index: number; path: string; noChat: boolean }
@@ -140,4 +176,10 @@ export const api = {
   updateCheck: (force: boolean) => invoke<UpdateInfo | null>("update_check", { force }),
   updateInstall: () => invoke<void>("update_install"),
   updateRestart: () => invoke<void>("update_restart"),
+  speechModelReady: () => invoke<boolean>("speech_model_ready"),
+  /** Downloads the speech model (~900 MB); reports `model-progress` ({ done, total }). */
+  speechModelInstall: () => invoke<void>("speech_model_install"),
+  /** Captions of `start..end` for editing; reports `transcribe-progress` (percent). A newer call cancels this one. */
+  transcribe: (vod: Vod, start: number, end: number, language: string | null, words: number) =>
+    invoke<Caption[]>("transcribe", { vod, start, end, language, words }),
 };

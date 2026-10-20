@@ -108,7 +108,8 @@
   type Target =
     | { kind: "src"; i: number; corner: [boolean, boolean] | null }
     | { kind: "piece"; i: number; resize: boolean }
-    | { kind: "chat"; corner: [boolean, boolean] | null };
+    | { kind: "chat"; corner: [boolean, boolean] | null }
+    | { kind: "subs" };
   type Drag = { target: Target; px: number; py: number; start: Layout };
   let drag = $state<Drag | null>(null);
 
@@ -117,7 +118,7 @@
     e.preventDefault();
     e.stopPropagation();
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
-    if (target.kind !== "chat") selected = target.i;
+    if (target.kind === "src" || target.kind === "piece") selected = target.i;
     drag = { target, px: e.clientX, py: e.clientY, start: $state.snapshot(layout) };
   }
 
@@ -138,6 +139,10 @@
     }
     const dx = Math.round(mx * canvasScale);
     const dy = Math.round(my * canvasScale);
+    if (target.kind === "subs") {
+      layout.subtitlesY = clamp(start.subtitlesY + dy / CANVAS_H, 0.05, 0.95);
+      return;
+    }
     if (target.kind === "piece") {
       const from = start.pieces[target.i];
       const piece = layout.pieces[target.i];
@@ -405,6 +410,21 @@
               {/each}
             </div>
           {/if}
+          {#if s.subtitles}
+            {@const st = s.subtitleStyle}
+            {@const k = canvasWidth / CANVAS_W}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              class="subs"
+              style:top="{layout.subtitlesY * 100}%"
+              style:font-size="{st.size * k}px"
+              style:-webkit-text-stroke="{Math.max(1, st.outline * k)}px var(--bg)"
+              style:color={hex(st.color)}
+              onpointerdown={(e) => startDrag(e, { kind: "subs" })}
+            >
+              {st.uppercase ? "СУБТИТРЫ ЗДЕСЬ" : "Субтитры здесь"}
+            </div>
+          {/if}
         </div>
         {#if panelError}
           <p class="error hint">{panelError}</p>
@@ -428,7 +448,8 @@
           {/if}
         </div>
         <p class="dim hint">
-          Тяните фрагменты и чат, за угол — размер. Шрифт, фон и подложка чата — из настроек оверлея.
+          Тяните фрагменты, чат и субтитры, за угол — размер. Шрифт, фон и подложка чата — из настроек оверлея, вид
+          субтитров — из настроек субтитров.
         </p>
       </div>
     </div>
@@ -536,6 +557,20 @@
 
   .chat {
     outline: 1px dashed var(--tertiary);
+  }
+
+  .subs {
+    position: absolute;
+    left: 4%;
+    right: 4%;
+    transform: translateY(-50%);
+    text-align: center;
+    font-family: Inter, sans-serif;
+    font-weight: 700;
+    line-height: 1.15;
+    paint-order: stroke fill;
+    outline: 1px dashed var(--primary);
+    cursor: ns-resize;
   }
 
   .chat img {

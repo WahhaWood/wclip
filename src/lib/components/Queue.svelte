@@ -56,6 +56,8 @@
               <span class="dim">Ожидает</span>
             {:else if s.state === "preparing"}
               <span class="dim">Загружаем чат…</span>
+            {:else if s.state === "transcribing"}
+              <span class="dim">Распознаём речь… {Math.round(s.fraction * 100)}%</span>
             {:else if s.state === "running"}
               {Math.round(s.fraction * 100)}%
             {:else if s.state === "retrying"}

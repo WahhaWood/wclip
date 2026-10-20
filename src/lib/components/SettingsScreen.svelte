@@ -7,6 +7,7 @@
   import { explain } from "$lib/errors";
   import { app, showUpdate } from "$lib/state.svelte";
   import { parseTime } from "$lib/time";
+  import SubtitleSettings from "./SubtitleSettings.svelte";
 
   // The parent renders this screen only once settings are loaded.
   const s = $derived(app.settings as Settings);
@@ -450,6 +451,8 @@
       </label>
     </div>
   </section>
+
+  <SubtitleSettings />
 
   <section class="glass card">
     <h2>Видео</h2>
