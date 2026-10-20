@@ -15,6 +15,8 @@ pub struct Vod {
     pub thumbnail: Option<String>,
     /// Direct HLS playlist of the best quality; ffmpeg reads it as input.
     pub playlist: String,
+    /// Video height of that playlist, pixels.
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +158,7 @@ mod tests {
                 duration: 100.0,
                 thumbnail: None,
                 playlist: String::new(),
+                height: None,
             },
             intervals: intervals
                 .iter()

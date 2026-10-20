@@ -2,6 +2,7 @@ pub mod chat;
 pub mod cut;
 pub mod images;
 pub mod job;
+pub mod overlay;
 pub mod tools;
 pub mod twitch;
 
@@ -70,12 +71,14 @@ async fn vod_info(input: String, state: State<'_, AppState>) -> Result<job::Vod,
 }
 
 /// Starts cutting every interval in order, reporting `clip` events and `job-done`
-/// at the end. `out_dir` defaults to `<Videos>/WClip`.
+/// at the end. No `overlay` style means clips without chat. `out_dir` defaults to
+/// `<Videos>/WClip`.
 #[tauri::command]
 fn job_start(
     app: AppHandle,
     state: State<AppState>,
     job: job::Job,
+    overlay: Option<overlay::OverlayStyle>,
     out_dir: Option<PathBuf>,
 ) -> Result<(), String> {
     if let Some((i, e)) = job.check().into_iter().next() {
@@ -87,6 +90,7 @@ fn job_start(
         None => app.path().video_dir().map_err(|e| e.to_string())?.join("WClip"),
     };
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("images");
 
     let mut running = state.job.lock().unwrap();
     if running.as_ref().is_some_and(|h| !h.inner().is_finished()) {
@@ -95,14 +99,31 @@ fn job_start(
     let task_app = app.clone();
     *running = Some(tauri::async_runtime::spawn(async move {
         let app = task_app;
+        let client = reqwest::Client::new();
+        let cache = images::ImageCache::new(cache_dir, client.clone());
         for (index, interval) in job.intervals.iter().enumerate() {
-            let out = job::clip_path(&out_dir, &job.vod, interval);
-            let progress = |fraction| {
-                let _ = app.emit("clip", ClipEvent::Running { index, fraction });
+            let _ = app.emit("clip", ClipEvent::Running { index, fraction: 0.0 });
+            let result = async {
+                let chat = match &overlay {
+                    Some(style) => Some(
+                        cut::load_chat(&client, &cache, &job.vod, interval, style)
+                            .await
+                            .map_err(|e| e.to_string())?,
+                    ),
+                    None => None,
+                };
+                let out = job::clip_path(&out_dir, &job.vod, interval);
+                let progress = |fraction| {
+                    let _ = app.emit("clip", ClipEvent::Running { index, fraction });
+                };
+                cut::cut(&tools, &job.vod.playlist, interval, chat, &out, progress)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(out)
             };
-            let event = match cut::cut(&tools, &job.vod.playlist, interval, &out, progress).await {
-                Ok(()) => ClipEvent::Done { index, path: out },
-                Err(e) => ClipEvent::Failed { index, error: e.to_string() },
+            let event = match result.await {
+                Ok(path) => ClipEvent::Done { index, path },
+                Err(error) => ClipEvent::Failed { index, error },
             };
             let _ = app.emit("clip", event);
         }

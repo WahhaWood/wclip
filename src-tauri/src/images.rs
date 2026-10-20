@@ -1,6 +1,7 @@
 //! Disk cache for badge and emote images. Images decode to RGBA; animated ones
 //! (GIF, WebP) give their first frame.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use image::RgbaImage;
@@ -17,6 +18,7 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone)]
 pub struct ImageCache {
     dir: PathBuf,
     client: reqwest::Client,
@@ -41,6 +43,31 @@ impl ImageCache {
             }
         };
         Ok(image::load_from_memory(&bytes)?.to_rgba8())
+    }
+
+    /// Every image that loads, a few downloads at a time.
+    pub async fn get_all(&self, urls: impl IntoIterator<Item = String>) -> HashMap<String, RgbaImage> {
+        const PARALLEL: usize = 16;
+        let mut out = HashMap::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        for url in urls {
+            if tasks.len() >= PARALLEL
+                && let Some(Ok((url, Ok(img)))) = tasks.join_next().await
+            {
+                out.insert(url, img);
+            }
+            let cache = self.clone();
+            tasks.spawn(async move {
+                let img = cache.get(&url).await;
+                (url, img)
+            });
+        }
+        while let Some(done) = tasks.join_next().await {
+            if let Ok((url, Ok(img))) = done {
+                out.insert(url, img);
+            }
+        }
+        out
     }
 }
 
