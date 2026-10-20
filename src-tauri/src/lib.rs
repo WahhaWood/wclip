@@ -249,8 +249,9 @@ async fn preview_frame(state: State<'_, AppState>, playlist: String, time: f64) 
 }
 
 /// Loads the chat of the whole video, reporting `chat-progress` events (0..=1),
-/// and keeps it for `chat_activity` and the clips; returns the message count. A
-/// local video needs its `chat_log`. A newer call cancels this one, which then
+/// and keeps it for `chat_activity` and the clips; returns the message count. VOD
+/// comments are also kept on disk (see `chat::cache`). A local video needs its
+/// `chat_log`. A newer call cancels this one, which then
 /// fails with "cancelled".
 #[tauri::command]
 async fn chat_load(app: AppHandle, state: State<'_, AppState>, vod: job::Vod, chat_log: Option<job::ChatLogRef>) -> Result<usize, Failure> {
@@ -259,6 +260,7 @@ async fn chat_load(app: AppHandle, state: State<'_, AppState>, vod: job::Vod, ch
         return Ok(loaded.messages.len());
     }
     let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("chat");
     let task_app = app.clone();
     let task = tauri::async_runtime::spawn(async move {
         match chat_log {
@@ -274,7 +276,9 @@ async fn chat_load(app: AppHandle, state: State<'_, AppState>, vod: job::Vod, ch
                 let progress = |fraction: f64| {
                     let _ = task_app.emit("chat-progress", fraction);
                 };
-                chat::load(&client, &vod.id, 0.0, vod.duration, progress).await.map_err(|e| Failure::new(Kind::Chat, e))
+                chat::load_whole(&client, &vod.id, vod.duration, &cache_dir, progress)
+                    .await
+                    .map_err(|e| Failure::new(Kind::Chat, e))
             }
         }
     });

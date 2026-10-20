@@ -1,8 +1,11 @@
 //! Record chat ready for rendering: messages with colors, badge and emote images
 //! resolved to URLs.
 
+pub mod cache;
 pub mod emotes;
 pub mod log;
+
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -95,14 +98,49 @@ pub async fn load(
     end: f64,
     on_progress: impl Fn(f64),
 ) -> twitch::Result<Vec<ChatMessage>> {
-    let owner = channel::video_owner(client, vod_id).await?;
-    let (badges, emotes, comments) = tokio::join!(
-        channel::badges(client, &owner.id),
-        emotes::load(client, &owner.id),
-        twitch::chat::fetch_comments(client, vod_id, start, end, on_progress),
-    );
-    let (badges, comments) = (badges?, comments?);
+    let (looks, comments) =
+        tokio::join!(channel_looks(client, vod_id), twitch::chat::fetch_comments(client, vod_id, start, end, on_progress));
+    let ((badges, emotes), comments) = (looks?, comments?);
     Ok(comments.iter().filter_map(|c| build(c, &badges, &emotes)).collect())
+}
+
+/// The whole chat of a VOD `duration` long, like `load`. Comments saved in
+/// `cache_dir` are used instead of downloading; downloaded ones are saved there.
+pub async fn load_whole(
+    client: &reqwest::Client,
+    vod_id: &str,
+    duration: f64,
+    cache_dir: &Path,
+    on_progress: impl Fn(f64),
+) -> twitch::Result<Vec<ChatMessage>> {
+    let (dir, id) = (cache_dir.to_owned(), vod_id.to_owned());
+    let saved = tokio::task::spawn_blocking(move || cache::read(&dir, &id, duration)).await.ok().flatten();
+    let fresh = saved.is_none();
+    let comments = async {
+        match saved {
+            Some(comments) => Ok(comments),
+            None => twitch::chat::fetch_comments(client, vod_id, 0.0, duration, on_progress).await,
+        }
+    };
+    let (looks, comments) = tokio::join!(channel_looks(client, vod_id), comments);
+    let ((badges, emotes), comments) = (looks?, comments?);
+    let messages = comments.iter().filter_map(|c| build(c, &badges, &emotes)).collect();
+    if fresh {
+        let (dir, id) = (cache_dir.to_owned(), vod_id.to_owned());
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = cache::write(&dir, &id, duration, &comments) {
+                crate::errlog::write("chat cache", &e.to_string());
+            }
+        });
+    }
+    Ok(messages)
+}
+
+/// Badges and third-party emotes of the channel that owns the VOD.
+async fn channel_looks(client: &reqwest::Client, vod_id: &str) -> twitch::Result<(Badges, Emotes)> {
+    let owner = channel::video_owner(client, vod_id).await?;
+    let (badges, emotes) = tokio::join!(channel::badges(client, &owner.id), emotes::load(client, &owner.id));
+    Ok((badges?, emotes))
 }
 
 /// Every message of `log`, timed from 0:00 of a video that starts at chat time
@@ -327,5 +365,32 @@ mod tests {
         let third_party = urls.iter().filter(|u| !u.contains("jtvnw.net")).count();
         println!("{} messages, {with_badges} with badges", msgs.len());
         println!("{} emotes, {third_party} third-party", urls.len());
+    }
+
+    /// Downloads 10 min of chat, then reads it back from the cache:
+    /// `cargo test -- --ignored smoke_whole_cached --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn smoke_whole_cached() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir().join(format!("wclip-smoke-chat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let started = std::time::Instant::now();
+        let downloaded = load_whole(&client, "2905205256", 600.0, &dir, |_| {}).await.unwrap();
+        println!("{} messages downloaded in {:.1} s", downloaded.len(), started.elapsed().as_secs_f64());
+        // Saved in the background.
+        let file = dir.join("2905205256.json.gz");
+        for _ in 0..50 {
+            if file.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        println!("cache file {} KB", std::fs::metadata(&file).unwrap().len() / 1024);
+        let started = std::time::Instant::now();
+        let cached = load_whole(&client, "2905205256", 600.0, &dir, |_| panic!("downloaded again")).await.unwrap();
+        println!("read back in {:.1} s", started.elapsed().as_secs_f64());
+        assert_eq!(cached, downloaded);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
