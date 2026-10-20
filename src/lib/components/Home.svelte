@@ -170,6 +170,9 @@
         <label class="toggle">
           <input type="checkbox" bind:checked={app.settings.chat} />
           Чат в кадре
+          {#if app.settings.chat && app.settings.activePreset}
+            <span class="dim">· {app.settings.activePreset}</span>
+          {/if}
         </label>
         <div class="out">
           <span class="dim">Папка:</span>

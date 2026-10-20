@@ -3,7 +3,7 @@
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
   import { onMount } from "svelte";
-  import { api, type Corner, type Settings } from "$lib/api";
+  import { api, type Preset, type Settings } from "$lib/api";
   import { explain } from "$lib/errors";
   import { app, showUpdate } from "$lib/state.svelte";
   import { parseTime } from "$lib/time";
@@ -12,17 +12,44 @@
   const s = $derived(app.settings as Settings);
 
   let fonts = $state<string[]>([]);
-  let preview = $state<string | null>(null);
-  let previewError = $state<string | null>(null);
-  let previewing = $state(false);
+  let frame = $state<string | null>(null);
+  let frameError = $state<string | null>(null);
+  let frameLoading = $state(false);
+  let panel = $state<string | null>(null);
+  let panelError = $state<string | null>(null);
   let presetName = $state("");
 
-  const corners: [Corner, string][] = [
-    ["top-left", "↖"],
-    ["top-right", "↗"],
-    ["bottom-left", "↙"],
-    ["bottom-right", "↘"],
+  /** Overlay sizes are pixels at this video height; the width follows the frame. */
+  const H = 1080;
+  const MIN_SIZE = 150;
+  /** Distance from the edges for the corner buttons. */
+  const EDGE = 24;
+  let aspect = $state(16 / 9);
+  const W = $derived(Math.round(H * aspect));
+  let stageWidth = $state(0);
+  const scale = $derived(stageWidth / W);
+
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, hi));
+
+  // Where ffmpeg puts the panel: moved back inside the frame when past an edge.
+  const box = $derived({
+    x: clamp(s.overlay.x, 0, W - s.overlay.width),
+    y: clamp(s.overlay.y, 0, H - s.overlay.height),
+    w: s.overlay.width,
+    h: s.overlay.height,
+  });
+
+  const corners: [string, number, number][] = [
+    ["↖", 0, 0],
+    ["↗", 1, 0],
+    ["↙", 0, 1],
+    ["↘", 1, 1],
   ];
+
+  function toCorner(right: number, bottom: number) {
+    s.overlay.x = right ? W - s.overlay.width - EDGE : EDGE;
+    s.overlay.y = bottom ? H - s.overlay.height - EDGE : EDGE;
+  }
 
   // Preview frame: the first interval start of the open VOD, else its middle.
   const previewTime = $derived.by(() => {
@@ -31,36 +58,130 @@
     return first ?? Math.floor(app.vod.duration / 2);
   });
 
+  function blobUrl(old: string | null, bytes: ArrayBuffer, type: string) {
+    if (old) URL.revokeObjectURL(old);
+    return URL.createObjectURL(new Blob([bytes], { type }));
+  }
+
   onMount(() => {
     api.fontFamilies().then((f) => (fonts = f), console.error);
     return () => {
-      if (preview) URL.revokeObjectURL(preview);
+      if (frame) URL.revokeObjectURL(frame);
+      if (panel) URL.revokeObjectURL(panel);
     };
   });
 
+  // The frame is fetched once per VOD and time; the panel goes over it separately.
+  $effect(() => {
+    const playlist = app.vod?.playlist;
+    const time = previewTime;
+    if (!playlist) return;
+    let stale = false;
+    frameLoading = true;
+    api
+      .previewFrame(playlist, time)
+      .then(
+        (jpeg) => {
+          if (stale) return;
+          frame = blobUrl(frame, jpeg, "image/jpeg");
+          frameError = null;
+        },
+        (e) => {
+          if (!stale) frameError = explain(e).text;
+        },
+      )
+      .finally(() => {
+        if (!stale) frameLoading = false;
+      });
+    return () => (stale = true);
+  });
+
+  // The panel depends on its look only; moving it needs no new picture.
   let timer: ReturnType<typeof setTimeout> | undefined;
   let seq = 0;
   $effect(() => {
-    const style = $state.snapshot(s.overlay);
-    const playlist = app.vod?.playlist ?? null;
-    const time = previewTime;
+    const o = s.overlay;
+    const look = {
+      x: 0,
+      y: 0,
+      width: o.width,
+      height: o.height,
+      font: o.font,
+      fontSize: o.fontSize,
+      background: o.background,
+      lifetime: o.lifetime,
+    };
     clearTimeout(timer);
     timer = setTimeout(async () => {
       const mine = ++seq;
-      previewing = true;
       try {
-        const png = await api.overlayPreview(playlist, time, style);
+        const png = await api.overlayPanel(look);
         if (mine !== seq) return;
-        if (preview) URL.revokeObjectURL(preview);
-        preview = URL.createObjectURL(new Blob([png], { type: "image/png" }));
-        previewError = null;
+        panel = blobUrl(panel, png, "image/png");
+        panelError = null;
       } catch (e) {
-        if (mine === seq) previewError = explain(e).text;
-      } finally {
-        if (mine === seq) previewing = false;
+        if (mine === seq) panelError = explain(e).text;
       }
-    }, 200);
+    }, 60);
   });
+
+  /** `move`, or the dragged corner as (x side, y side): 1 is the right or bottom edge. */
+  type Drag = { mode: "move" | [number, number]; px: number; py: number; start: typeof box };
+  let drag = $state<Drag | null>(null);
+
+  function startDrag(e: PointerEvent, mode: Drag["mode"]) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    drag = { mode, px: e.clientX, py: e.clientY, start: { ...box } };
+  }
+
+  function onDrag(e: PointerEvent) {
+    if (!drag || !scale) return;
+    const dx = (e.clientX - drag.px) / scale;
+    const dy = (e.clientY - drag.py) / scale;
+    const { x, y, w, h } = drag.start;
+    const o = s.overlay;
+    if (drag.mode === "move") {
+      o.x = Math.round(clamp(x + dx, 0, W - w));
+      o.y = Math.round(clamp(y + dy, 0, H - h));
+      return;
+    }
+    const [sx, sy] = drag.mode;
+    [o.x, o.width] = resizeAxis(x, w, dx, sx, W);
+    [o.y, o.height] = resizeAxis(y, h, dy, sy, H);
+  }
+
+  /** One axis of a corner drag: `far` moves the right or bottom edge, else the near one. */
+  function resizeAxis(pos: number, size: number, d: number, far: number, limit: number): [number, number] {
+    if (far) return [pos, Math.round(clamp(size + d, MIN_SIZE, limit - pos))];
+    const end = pos + size;
+    const start = Math.round(clamp(pos + d, 0, end - MIN_SIZE));
+    return [start, end - start];
+  }
+
+  // The active preset follows every edit, so it never needs saving by hand.
+  $effect(() => {
+    const style = $state.snapshot(s.overlay);
+    const preset = s.presets.find((p) => p.name === s.activePreset);
+    if (preset) preset.style = style;
+  });
+
+  /** Picks `preset`; picking the active one again detaches the overlay from it. */
+  function pickPreset(preset: Preset) {
+    if (s.activePreset === preset.name) {
+      s.activePreset = null;
+      return;
+    }
+    s.overlay = $state.snapshot(preset.style);
+    s.activePreset = preset.name;
+  }
+
+  function deletePreset(i: number) {
+    if (s.presets[i].name === s.activePreset) s.activePreset = null;
+    s.presets.splice(i, 1);
+  }
 
   function savePreset() {
     const name = presetName.trim();
@@ -69,6 +190,7 @@
     const existing = s.presets.find((p) => p.name === name);
     if (existing) existing.style = style;
     else s.presets.push({ name, style });
+    s.activePreset = name;
     presetName = "";
   }
 
@@ -110,47 +232,91 @@
   <section class="glass card">
     <h2>Оверлей чата</h2>
     <div class="overlay">
-      <div class="preview">
-        {#if preview}
-          <img src={preview} alt="Превью оверлея" class:stale={previewing} />
-        {:else}
-          <div class="placeholder dim">{previewError ?? "Готовим превью…"}</div>
-        {/if}
+      <div>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="stage"
+          class:dragging={drag}
+          style:aspect-ratio={aspect}
+          style:width="min(100%, calc(60vh * {aspect}))"
+          bind:clientWidth={stageWidth}
+          onpointermove={onDrag}
+          onpointerup={() => (drag = null)}
+          onpointercancel={() => (drag = null)}
+        >
+          {#if frame}
+            <img
+              class="frame"
+              src={frame}
+              alt=""
+              onload={(e) => {
+                const img = e.currentTarget as HTMLImageElement;
+                if (img.naturalHeight) aspect = img.naturalWidth / img.naturalHeight;
+              }}
+            />
+          {/if}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="panel"
+            style:left="{(box.x / W) * 100}%"
+            style:top="{(box.y / H) * 100}%"
+            style:width="{(box.w / W) * 100}%"
+            style:height="{(box.h / H) * 100}%"
+            onpointerdown={(e) => startDrag(e, "move")}
+          >
+            {#if panel}
+              <img src={panel} alt="Превью чата" draggable="false" />
+            {/if}
+            {#each corners as [, right, bottom] (`${right}${bottom}`)}
+              <span
+                class="handle"
+                style:left={right ? "100%" : "0"}
+                style:top={bottom ? "100%" : "0"}
+                style:cursor={right === bottom ? "nwse-resize" : "nesw-resize"}
+                onpointerdown={(e) => startDrag(e, [right, bottom])}
+              ></span>
+            {/each}
+          </div>
+          {#if frameLoading && !frame}
+            <span class="badge dim">Загружаем кадр…</span>
+          {/if}
+        </div>
         <p class="dim hint">
-          {app.vod
-            ? "Кадр из открытой записи, сообщения для примера."
-            : "Откройте запись, чтобы увидеть превью на её кадре."}
+          Тяните панель, чтобы сдвинуть, за углы — чтобы изменить размер.
+          {app.vod ? "Кадр из открытой записи, сообщения для примера." : "Откройте запись, чтобы увидеть её кадр."}
         </p>
-        {#if preview && previewError}
-          <p class="error hint">{previewError}</p>
+        {#if frameError || panelError}
+          <p class="error hint">{frameError ?? panelError}</p>
         {/if}
       </div>
 
       <div class="controls">
         <div class="control">
-          <span>Угол</span>
+          <span>Прижать к углу</span>
           <div class="corners">
-            {#each corners as [corner, arrow] (corner)}
-              <button
-                class="btn small"
-                class:selected={s.overlay.corner === corner}
-                onclick={() => (s.overlay.corner = corner)}>{arrow}</button
-              >
+            {#each corners as [arrow, right, bottom] (arrow)}
+              <button class="btn small" onclick={() => toCorner(right, bottom)}>{arrow}</button>
             {/each}
           </div>
         </div>
 
+        <div class="pair">
+          <label class="control">
+            <span>X</span>
+            <input class="field" type="number" min="0" max={W} bind:value={s.overlay.x} />
+          </label>
+          <label class="control">
+            <span>Y</span>
+            <input class="field" type="number" min="0" max={H} bind:value={s.overlay.y} />
+          </label>
+        </div>
         <label class="control">
           <span>Ширина <b>{s.overlay.width}</b></span>
-          <input type="range" min="200" max="1000" step="10" bind:value={s.overlay.width} />
+          <input type="range" min={MIN_SIZE} max={W} step="10" bind:value={s.overlay.width} />
         </label>
         <label class="control">
           <span>Высота <b>{s.overlay.height}</b></span>
-          <input type="range" min="150" max="1000" step="10" bind:value={s.overlay.height} />
-        </label>
-        <label class="control">
-          <span>Отступ от края <b>{s.overlay.margin}</b></span>
-          <input type="range" min="0" max="200" step="2" bind:value={s.overlay.margin} />
+          <input type="range" min={MIN_SIZE} max={H} step="10" bind:value={s.overlay.height} />
         </label>
         <label class="control">
           <span>Шрифт</span>
@@ -178,7 +344,7 @@
           </span>
           <input type="range" min="0" max="120" step="1" bind:value={s.overlay.lifetime} />
         </label>
-        <p class="dim hint">Размеры в пикселях для 1080p, на другом разрешении масштабируются.</p>
+        <p class="dim hint">Пиксели для 1080p, на другом разрешении масштабируются.</p>
       </div>
     </div>
   </section>
@@ -188,13 +354,18 @@
     <div class="presets">
       {#each s.presets as preset, i (preset.name)}
         <div class="preset">
-          <button class="btn small" onclick={() => (s.overlay = $state.snapshot(preset.style))}>
+          <button
+            class="btn small"
+            class:selected={s.activePreset === preset.name}
+            title={s.activePreset === preset.name ? "Нажмите ещё раз, чтобы отвязать" : "Применить"}
+            onclick={() => pickPreset(preset)}
+          >
             {preset.name}
           </button>
-          <button class="btn small" title="Удалить" onclick={() => s.presets.splice(i, 1)}>✕</button>
+          <button class="btn small" title="Удалить" onclick={() => deletePreset(i)}>✕</button>
         </div>
       {:else}
-        <span class="dim">Пока нет. Сохраните текущие настройки оверлея под именем.</span>
+        <span class="dim">Пока нет. Сохраните текущий оверлей под именем.</span>
       {/each}
     </div>
     <form
@@ -204,9 +375,12 @@
         savePreset();
       }}
     >
-      <input class="field" placeholder="Имя пресета" bind:value={presetName} />
-      <button class="btn primary" disabled={!presetName.trim()}>Сохранить</button>
+      <input class="field" placeholder="Имя нового пресета" bind:value={presetName} />
+      <button class="btn primary" disabled={!presetName.trim()}>Создать</button>
     </form>
+    <p class="dim hint">
+      Всё сохраняется само. Правки оверлея попадают в выбранный пресет, и нарезка сразу идёт с ним.
+    </p>
   </section>
 
   <section class="glass card">
@@ -253,33 +427,74 @@
 
   .overlay {
     display: grid;
-    grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr);
-    gap: 24px;
-    align-items: start;
+    gap: 20px;
   }
 
-  .preview img,
-  .placeholder {
-    width: 100%;
-    aspect-ratio: 16 / 9;
+  .stage {
+    position: relative;
+    margin: 0 auto;
+    overflow: hidden;
     border-radius: 12px;
     border: 1px solid var(--outline);
+    background: linear-gradient(135deg, var(--surface-highest), var(--bg));
+    touch-action: none;
+    user-select: none;
   }
 
-  .preview img.stale {
-    opacity: 0.7;
+  .frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
 
-  .placeholder {
-    display: grid;
-    place-items: center;
-    padding: 16px;
-    text-align: center;
+  .panel {
+    position: absolute;
+    outline: 1px dashed var(--primary);
+    cursor: move;
+  }
+
+  .panel img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .handle {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    margin: -6px 0 0 -6px;
+    border-radius: 3px;
+    background: var(--primary);
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .stage:hover .handle,
+  .stage.dragging .handle {
+    opacity: 1;
+  }
+
+  .badge {
+    position: absolute;
+    left: 12px;
+    top: 10px;
+    font-size: 13px;
   }
 
   .controls {
     display: grid;
-    gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px 28px;
+    align-items: start;
+  }
+
+  .controls > .hint {
+    grid-column: 1 / -1;
+    margin: 0;
   }
 
   .control {
@@ -296,6 +511,12 @@
   .corners {
     display: flex;
     gap: 6px;
+  }
+
+  .pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
   }
 
   input[type="range"] {

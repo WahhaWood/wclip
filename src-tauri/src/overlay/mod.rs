@@ -15,27 +15,19 @@ use crate::chat::ChatMessage;
 use feed::Feed;
 use text::Typesetter;
 
-/// Overlay frame rate; ffmpeg repeats frames to match the video.
-pub const FPS: u32 = 30;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Corner {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
+/// Overlay frame rate, that of most Twitch VODs: at 30 a scrolling chat stutters
+/// over 60 fps video. ffmpeg matches it to the video by timestamps.
+pub const FPS: u32 = 60;
 
 /// Overlay preset. Sizes are pixels at 1080p and scale with the video height.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct OverlayStyle {
-    pub corner: Corner,
+    /// Top-left corner of the panel; ffmpeg keeps the panel inside the frame.
+    pub x: u32,
+    pub y: u32,
     pub width: u32,
     pub height: u32,
-    /// Distance from the video edges.
-    pub margin: u32,
     /// Font family for text; emoji and missing glyphs fall back to other fonts.
     pub font: String,
     pub font_size: f32,
@@ -48,10 +40,11 @@ pub struct OverlayStyle {
 impl Default for OverlayStyle {
     fn default() -> Self {
         Self {
-            corner: Corner::BottomLeft,
+            // Bottom-left, 24 px from the edges.
+            x: 24,
+            y: 1080 - 520 - 24,
             width: 440,
             height: 520,
-            margin: 24,
             font: text::FONT_FAMILY.to_owned(),
             font_size: 22.0,
             background: 0.0,
@@ -63,42 +56,21 @@ impl Default for OverlayStyle {
 impl OverlayStyle {
     pub fn scaled(&self, video_height: u32) -> Self {
         let k = video_height as f32 / 1080.0;
-        let px = |v: u32| ((v as f32 * k).round() as u32).max(1);
+        let px = |v: u32| (v as f32 * k).round() as u32;
         Self {
-            width: px(self.width) & !1,
-            height: px(self.height) & !1,
-            margin: px(self.margin),
+            x: px(self.x),
+            y: px(self.y),
+            width: px(self.width).max(2) & !1,
+            height: px(self.height).max(2) & !1,
             font_size: self.font_size * k,
             ..self.clone()
         }
     }
 
-    /// ffmpeg `overlay` filter position.
+    /// ffmpeg `overlay` filter position, quoted. A panel past the right or bottom
+    /// edge (a wider preset on a 4:3 video) is moved back inside.
     pub fn position(&self) -> (String, String) {
-        let m = self.margin;
-        let left = m.to_string();
-        let top = m.to_string();
-        let right = format!("main_w-overlay_w-{m}");
-        let bottom = format!("main_h-overlay_h-{m}");
-        match self.corner {
-            Corner::TopLeft => (left, top),
-            Corner::TopRight => (right, top),
-            Corner::BottomLeft => (left, bottom),
-            Corner::BottomRight => (right, bottom),
-        }
-    }
-
-    /// Top-left corner of the panel on a `video_w` x `video_h` frame.
-    pub fn offset(&self, video_w: u32, video_h: u32) -> (i64, i64) {
-        let m = i64::from(self.margin);
-        let right = i64::from(video_w) - i64::from(self.width) - m;
-        let bottom = i64::from(video_h) - i64::from(self.height) - m;
-        match self.corner {
-            Corner::TopLeft => (m, m),
-            Corner::TopRight => (right, m),
-            Corner::BottomLeft => (m, bottom),
-            Corner::BottomRight => (right, bottom),
-        }
+        (format!("'min({},main_w-overlay_w)'", self.x), format!("'min({},main_h-overlay_h)'", self.y))
     }
 
     /// How much chat before the clip start to load so the panel starts filled.
@@ -184,19 +156,15 @@ impl Overlay {
     }
 }
 
-/// `frame` with the overlay in `style` (unscaled) on top, filled with made-up
-/// messages: settings preview without loading any chat.
-pub fn preview(frame: &RgbaImage, style: &OverlayStyle) -> RgbaImage {
-    let style = style.scaled(frame.height());
-    let (x, y) = style.offset(frame.width(), frame.height());
+/// The panel in `style` at 1080p, filled with made-up messages: settings preview
+/// without loading any chat.
+pub fn sample_panel(style: &OverlayStyle) -> RgbaImage {
+    let style = style.scaled(1080);
     let (w, h) = (style.width, style.height);
     let messages = sample_messages();
     let t = messages.last().map_or(0.0, |m| m.time) + 1.0;
     let mut overlay = Overlay::new(style, messages, HashMap::new());
-    let panel = RgbaImage::from_raw(w, h, overlay.frame(t).to_vec()).expect("frame size");
-    let mut out = frame.clone();
-    image::imageops::overlay(&mut out, &panel, x, y);
-    out
+    RgbaImage::from_raw(w, h, overlay.frame(t).to_vec()).expect("frame size")
 }
 
 fn sample_messages() -> Vec<ChatMessage> {
@@ -277,7 +245,7 @@ mod tests {
     #[test]
     fn scaled_style_is_even() {
         let s = OverlayStyle::default().scaled(720);
-        assert_eq!((s.width, s.height, s.margin), (292, 346, 16));
+        assert_eq!((s.x, s.y, s.width, s.height), (16, 357, 292, 346));
         assert!((s.font_size - 22.0 * 720.0 / 1080.0).abs() < 1e-4);
     }
 

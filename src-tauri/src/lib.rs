@@ -16,7 +16,6 @@ use std::time::{Duration, SystemTime};
 
 use failure::{Failure, Kind};
 use serde::Serialize;
-use image::RgbaImage;
 use tauri::async_runtime::JoinHandle;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -32,8 +31,8 @@ struct AppState {
     tools: Mutex<Option<tools::Tools>>,
     /// The running job; aborting it kills ffmpeg (see `cut::cut`).
     job: Mutex<Option<JoinHandle<()>>>,
-    /// Last preview frame: (playlist, VOD time, frame).
-    preview_frame: Mutex<Option<(String, f64, Arc<RgbaImage>)>>,
+    /// Last preview frame: (playlist, VOD time, JPEG).
+    preview_frame: Mutex<Option<(String, f64, Arc<Vec<u8>>)>>,
     /// Release found by the last update check.
     update: Mutex<Option<updater::Release>>,
     /// Updated copy to start on restart.
@@ -146,36 +145,29 @@ async fn font_families() -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// PNG of the VOD frame at `time` with the overlay in `style` over it, 960 px wide.
-/// The frame is fetched once per (playlist, time); without a playlist the overlay
-/// goes over a plain 1080p background.
+/// JPEG of the VOD frame at `time`, 960 px wide, behind the overlay preview.
+/// Fetched once per (playlist, time).
 #[tauri::command]
-async fn overlay_preview(
-    state: State<'_, AppState>,
-    playlist: Option<String>,
-    time: f64,
-    style: overlay::OverlayStyle,
-) -> Result<Response, Failure> {
-    let cached = state.preview_frame.lock().unwrap().clone();
-    let frame = match (cached, playlist) {
-        (_, None) => Arc::new(RgbaImage::from_fn(1920, 1080, |x, y| {
-            let v = (40 + (x + y) * 50 / 3000) as u8;
-            image::Rgba([v / 2, v / 2, v, 255])
-        })),
-        (Some((p, t, frame)), Some(playlist)) if p == playlist && t == time => frame,
-        (_, Some(playlist)) => {
-            let tools = ready_tools(&state)?;
-            let frame = Arc::new(cut::grab_frame(&tools, &playlist, time).await.map_err(|e| log("preview", Failure::new(e.kind(), e)))?);
-            *state.preview_frame.lock().unwrap() = Some((playlist, time, Arc::clone(&frame)));
-            frame
-        }
-    };
+async fn preview_frame(state: State<'_, AppState>, playlist: String, time: f64) -> Result<Response, Failure> {
+    if let Some((p, t, jpeg)) = state.preview_frame.lock().unwrap().as_ref()
+        && *p == playlist
+        && *t == time
+    {
+        return Ok(Response::new(jpeg.to_vec()));
+    }
+    let tools = ready_tools(&state)?;
+    let jpeg = cut::grab_frame(&tools, &playlist, time).await.map_err(|e| log("preview", Failure::new(e.kind(), e)))?;
+    *state.preview_frame.lock().unwrap() = Some((playlist, time, Arc::new(jpeg.clone())));
+    Ok(Response::new(jpeg))
+}
+
+/// PNG of the chat panel in `style` at 1080p with made-up messages; the settings
+/// screen places it over the frame itself.
+#[tauri::command]
+async fn overlay_panel(style: overlay::OverlayStyle) -> Result<Response, String> {
     let png = tauri::async_runtime::spawn_blocking(move || {
-        let img = overlay::preview(&frame, &style);
-        let height = (img.height() as f32 * 960.0 / img.width() as f32).round() as u32;
-        let small = image::imageops::resize(&img, 960, height.max(1), image::imageops::FilterType::Triangle);
         let mut out = std::io::Cursor::new(Vec::new());
-        small.write_to(&mut out, image::ImageFormat::Png).map(|()| out.into_inner())
+        overlay::sample_panel(&style).write_to(&mut out, image::ImageFormat::Png).map(|()| out.into_inner())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -335,6 +327,7 @@ pub fn run() {
             errlog::init(app.path().app_log_dir()?.join("wclip.log"));
             let dir = tools_dir(app.handle())?;
             tauri::async_runtime::spawn_blocking(move || tools::update_yt_dlp(&dir));
+            tauri::async_runtime::spawn_blocking(overlay::text::Typesetter::warm_up);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -344,7 +337,8 @@ pub fn run() {
             settings_load,
             settings_save,
             font_families,
-            overlay_preview,
+            preview_frame,
+            overlay_panel,
             job_start,
             job_cancel,
             error_log,

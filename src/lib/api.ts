@@ -18,12 +18,12 @@ export type Vod = {
 export type Interval = { start: number; end: number; name: string };
 export type Job = { vod: Vod; intervals: Interval[] };
 
-export type Corner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+/** Positions and sizes are pixels at 1080p; (x, y) is the panel's top-left corner. */
 export type OverlayStyle = {
-  corner: Corner;
+  x: number;
+  y: number;
   width: number;
   height: number;
-  margin: number;
   font: string;
   fontSize: number;
   background: number;
@@ -37,6 +37,8 @@ export type Settings = {
   chat: boolean;
   overlay: OverlayStyle;
   presets: Preset[];
+  /** Preset picked last; edits to `overlay` go into it too. */
+  activePreset: string | null;
   skippedVersion: string | null;
 };
 
@@ -62,8 +64,8 @@ export const api = {
   settingsLoad: () => invoke<Settings>("settings_load"),
   settingsSave: (settings: Settings) => invoke<void>("settings_save", { settings }),
   fontFamilies: () => invoke<string[]>("font_families"),
-  overlayPreview: (playlist: string | null, time: number, style: OverlayStyle) =>
-    invoke<ArrayBuffer>("overlay_preview", { playlist, time, style }),
+  previewFrame: (playlist: string, time: number) => invoke<ArrayBuffer>("preview_frame", { playlist, time }),
+  overlayPanel: (style: OverlayStyle) => invoke<ArrayBuffer>("overlay_panel", { style }),
   jobStart: (job: Job, overlay: OverlayStyle | null, outDir: string | null, nameTemplate: string) =>
     invoke<void>("job_start", { job, overlay, outDir, nameTemplate }),
   jobCancel: () => invoke<void>("job_cancel"),

@@ -17,6 +17,8 @@ pub struct Settings {
     pub chat: bool,
     pub overlay: OverlayStyle,
     pub presets: Vec<Preset>,
+    /// Preset picked last; changes to `overlay` go into it too.
+    pub active_preset: Option<String>,
     /// Release the user chose to skip; its update banner is not shown again.
     pub skipped_version: Option<String>,
 }
@@ -35,6 +37,7 @@ impl Default for Settings {
             chat: true,
             overlay: OverlayStyle::default(),
             presets: Vec::new(),
+            active_preset: None,
             skipped_version: None,
         }
     }
@@ -59,7 +62,6 @@ pub fn save(path: &Path, settings: &Settings) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::overlay::Corner;
 
     #[test]
     fn round_trip_and_defaults() {
@@ -68,12 +70,14 @@ mod tests {
         assert_eq!(load(&path).name_template, DEFAULT_TEMPLATE, "no file yet");
 
         let mut s = Settings::default();
-        s.overlay.corner = Corner::TopRight;
+        s.overlay.x = 1400;
         s.presets.push(Preset { name: "big".into(), style: OverlayStyle { font_size: 30.0, ..OverlayStyle::default() } });
+        s.active_preset = Some("big".into());
         save(&path, &s).unwrap();
         let back = load(&path);
-        assert_eq!(back.overlay.corner, Corner::TopRight);
+        assert_eq!(back.overlay.x, 1400);
         assert_eq!(back.presets[0].style.font_size, 30.0);
+        assert_eq!(back.active_preset.as_deref(), Some("big"));
 
         std::fs::write(&path, r#"{"chat": false, "overlay": {"width": 300}}"#).unwrap();
         let partial = load(&path);

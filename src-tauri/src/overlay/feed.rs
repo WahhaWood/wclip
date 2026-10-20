@@ -3,7 +3,7 @@
 //! the message fades in; with a lifetime set, old messages fade out at the top.
 
 /// Slide and fade-in time of a new message, seconds.
-pub const SLIDE: f64 = 0.2;
+pub const SLIDE: f64 = 0.3;
 /// Fade-out time of an expired message, seconds.
 pub const FADE: f64 = 0.4;
 
@@ -50,7 +50,9 @@ impl Feed {
             if age >= SLIDE {
                 break;
             }
-            lift += (1.0 - ease(age / SLIDE)) as f32 * (height(i) + self.gap);
+            // Starts and ends at rest: slides of a busy chat add up to a steady
+            // scroll instead of a kick per message.
+            lift += (1.0 - smoothstep(age / SLIDE)) as f32 * (height(i) + self.gap);
         }
 
         let mut out = Vec::new();
@@ -78,6 +80,12 @@ impl Feed {
 /// Ease-out cubic.
 fn ease(x: f64) -> f64 {
     1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3)
+}
+
+/// Ease-in-out cubic: zero speed at both ends.
+fn smoothstep(x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
 }
 
 #[cfg(test)]

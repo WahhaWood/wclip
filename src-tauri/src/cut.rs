@@ -94,21 +94,19 @@ pub struct ChatOverlay {
     pub images: HashMap<String, RgbaImage>,
 }
 
-/// Video frame at VOD time `t`, for the overlay preview.
-pub async fn grab_frame(tools: &Tools, playlist: &str, t: f64) -> Result<RgbaImage> {
+/// JPEG of the video frame at VOD time `t`, 960 px wide, for the overlay preview.
+pub async fn grab_frame(tools: &Tools, playlist: &str, t: f64) -> Result<Vec<u8>> {
     let out = tokio_command(&tools.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
         .args(HLS_INPUT)
         .args(["-ss", &t.to_string(), "-i", playlist])
-        .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"])
+        .args(["-frames:v", "1", "-vf", "scale=960:-2", "-q:v", "3", "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"])
         .output()
         .await?;
-    if !out.status.success() {
+    if !out.status.success() || out.stdout.is_empty() {
         return Err(tool_error(&out.stderr, "ffmpeg"));
     }
-    image::load_from_memory_with_format(&out.stdout, image::ImageFormat::Png)
-        .map(|img| img.to_rgba8())
-        .map_err(|e| Error::Tool(format!("ffmpeg frame: {e}")))
+    Ok(out.stdout)
 }
 
 /// Loads the chat shown during `interval` (with lookback, so the panel starts
@@ -350,7 +348,7 @@ mod tests {
             parts: vec![Part::Emote { name: "m".into(), url: "m".into() }],
         };
         let style = OverlayStyle { background: 1.0, ..OverlayStyle::default() }.scaled(vod.height.unwrap());
-        let (style_margin, style_width, style_height) = (style.margin, style.width, style.height);
+        let (x, y, style_width, style_height) = (style.x, style.y, style.width, style.height);
         let chat = ChatOverlay {
             style,
             messages: vec![message],
@@ -360,7 +358,6 @@ mod tests {
         cut(&tools, &vod.playlist, &interval, Some(chat), &out, |_| {}).await.unwrap();
 
         // Only the panel (black background), so magenta in the video itself does not count.
-        let (x, y) = (style_margin, vod.height.unwrap() - style_height - style_margin);
         let magenta_pixels = |img: &RgbaImage| {
             let panel = image::imageops::crop_imm(img, x, y, style_width, style_height).to_image();
             // Low threshold: the message fades in from transparent.
@@ -368,7 +365,8 @@ mod tests {
         };
         let frame = 1.0 / f64::from(overlay::FPS);
         let before = magenta_pixels(&frame_at(&tools, &out, 2.0 - frame));
-        let after = magenta_pixels(&frame_at(&tools, &out, 2.0 + 2.0 * frame));
+        // Halfway through the slide: it starts at rest, below the panel bottom.
+        let after = magenta_pixels(&frame_at(&tools, &out, 2.0 + overlay::feed::SLIDE / 2.0));
         let settled = magenta_pixels(&frame_at(&tools, &out, 3.0));
         println!("magenta pixels: before {before}, after {after}, settled {settled}");
         assert_eq!(before, 0, "message shown early");
