@@ -8,6 +8,10 @@ import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
   preprocess: vitePreprocess(),
+  // Styles ship inside each component's JS. With separate virtual CSS modules the dev
+  // server sometimes serves a CSS request before the component is compiled and falls
+  // back to the raw .svelte file: styles go unscoped and the first rule is lost.
+  compilerOptions: { css: "injected" },
   kit: {
     adapter: adapter({
       fallback: "index.html",
