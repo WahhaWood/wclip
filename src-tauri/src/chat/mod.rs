@@ -4,6 +4,8 @@
 pub mod emotes;
 pub mod log;
 
+use serde::{Deserialize, Serialize};
+
 use crate::twitch::channel::{self, Badges};
 use crate::twitch::{self, chat::Comment};
 use emotes::Emotes;
@@ -23,6 +25,45 @@ pub struct ChatMessage {
 pub enum Part {
     Text(String),
     Emote { name: String, url: String },
+}
+
+/// Which messages the overlay leaves out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatFilter {
+    pub hide_bots: bool,
+    /// Names of bots, any case.
+    pub bots: Vec<String>,
+    /// Messages starting with `!`: commands to a bot.
+    pub hide_commands: bool,
+}
+
+/// Bots found in most channels.
+const BOTS: [&str; 10] = [
+    "Nightbot",
+    "StreamElements",
+    "Streamlabs",
+    "Moobot",
+    "Fossabot",
+    "WizeBot",
+    "Sery_Bot",
+    "SoundAlerts",
+    "Kofistreambot",
+    "PokemonCommunityGame",
+];
+
+impl Default for ChatFilter {
+    fn default() -> Self {
+        Self { hide_bots: true, bots: BOTS.map(String::from).to_vec(), hide_commands: false }
+    }
+}
+
+impl ChatFilter {
+    pub fn keeps(&self, m: &ChatMessage) -> bool {
+        let bot = self.hide_bots && self.bots.iter().any(|b| b.trim().eq_ignore_ascii_case(&m.name));
+        let command = self.hide_commands && matches!(m.parts.first(), Some(Part::Text(t)) if t.trim_start().starts_with('!'));
+        !bot && !command
+    }
 }
 
 /// Colors Twitch assigns to users who never picked one.
@@ -45,18 +86,20 @@ const DEFAULT_COLORS: [[u8; 3]; 15] = [
 ];
 
 /// Messages with `start <= time < end`, sorted by time. Pass a `start` earlier than
-/// the clip so the overlay does not begin with an empty chat.
+/// the clip so the overlay does not begin with an empty chat. `on_progress` gets
+/// the share of comments downloaded, 0..=1.
 pub async fn load(
     client: &reqwest::Client,
     vod_id: &str,
     start: f64,
     end: f64,
+    on_progress: impl Fn(f64),
 ) -> twitch::Result<Vec<ChatMessage>> {
     let owner = channel::video_owner(client, vod_id).await?;
     let (badges, emotes, comments) = tokio::join!(
         channel::badges(client, &owner.id),
         emotes::load(client, &owner.id),
-        twitch::chat::fetch_comments(client, vod_id, start, end),
+        twitch::chat::fetch_comments(client, vod_id, start, end, on_progress),
     );
     let (badges, comments) = (badges?, comments?);
     Ok(comments.iter().filter_map(|c| build(c, &badges, &emotes)).collect())
@@ -64,20 +107,28 @@ pub async fn load(
 
 /// Every message of `log`, timed from 0:00 of a video that starts at chat time
 /// `start`. Badges and emotes are best effort: offline the chat stays plain text.
+/// Chatterino logs keep Twitch emotes as words; the global ones are recognised.
 pub async fn from_log(client: &reqwest::Client, log: &log::ChatLog, start: f64) -> Vec<ChatMessage> {
     let id = match &log.channel_id {
         Some(id) => Some(id.clone()),
         None if !log.info.channel.is_empty() => channel::user_id(client, &log.info.channel).await.ok().flatten(),
         None => None,
     };
-    let (badges, emotes) = match &id {
+    let (badges, third_party, twitch) = match &id {
         Some(id) => {
-            let (badges, emotes) = tokio::join!(channel::badges(client, id), emotes::load(client, id));
-            (badges.unwrap_or_default(), emotes)
+            let (badges, emotes, twitch) =
+                tokio::join!(channel::badges(client, id), emotes::load(client, id), channel::global_emotes(client));
+            (badges.unwrap_or_default(), emotes, twitch)
         }
         // Global third-party emotes still apply.
-        None => (Badges::new(), emotes::load(client, "").await),
+        None => {
+            let (emotes, twitch) = tokio::join!(emotes::load(client, ""), channel::global_emotes(client));
+            (Badges::new(), emotes, twitch)
+        }
     };
+    // Third-party emotes win a clash: the chat sees what the extensions show.
+    let mut emotes: Emotes = twitch.unwrap_or_default().into_iter().map(|(name, id)| (name, twitch_emote_url(&id))).collect();
+    emotes.extend(third_party);
     log.comments
         .iter()
         .filter_map(|c| build(c, &badges, &emotes))
@@ -92,13 +143,7 @@ pub fn build(comment: &Comment, badges: &Badges, emotes: &Emotes) -> Option<Chat
     let mut parts = Vec::new();
     for fragment in &message.fragments {
         match &fragment.emote {
-            Some(e) => parts.push(Part::Emote {
-                name: fragment.text.clone(),
-                url: format!(
-                    "https://static-cdn.jtvnw.net/emoticons/v2/{}/static/dark/2.0",
-                    e.emote_id
-                ),
-            }),
+            Some(e) => parts.push(Part::Emote { name: fragment.text.clone(), url: twitch_emote_url(&e.emote_id) }),
             None => push_text(&mut parts, &fragment.text, emotes),
         }
     }
@@ -117,6 +162,11 @@ pub fn build(comment: &Comment, badges: &Badges, emotes: &Emotes) -> Option<Chat
             .collect(),
         parts,
     })
+}
+
+/// `default` serves the animated GIF of an animated emote, the PNG of a still one.
+fn twitch_emote_url(id: &str) -> String {
+    format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/2.0")
 }
 
 /// Splits on spaces and turns words found in `emotes` into emote parts; the spaces
@@ -202,6 +252,19 @@ mod tests {
     }
 
     #[test]
+    fn filter() {
+        let m = |name: &str, t: &str| ChatMessage { time: 0.0, name: name.into(), color: [0; 3], badges: Vec::new(), parts: vec![text(t)] };
+        let mut f = ChatFilter::default();
+        assert!(!f.keeps(&m("nightbot", "hi")), "any case");
+        assert!(f.keeps(&m("alice", "!uptime")), "commands kept by default");
+        f.hide_commands = true;
+        assert!(!f.keeps(&m("alice", "  !uptime")));
+        assert!(f.keeps(&m("alice", "wow !")));
+        f.hide_bots = false;
+        assert!(f.keeps(&m("Nightbot", "hi")));
+    }
+
+    #[test]
     fn colors() {
         let none = Badges::new();
         let msg = build(&comment("alice", Some("#1E90FF"), "hi"), &none, &Emotes::new()).unwrap();
@@ -236,7 +299,7 @@ mod tests {
             msgs[0].parts,
             vec![
                 text("hi "),
-                emote("Kappa", "https://static-cdn.jtvnw.net/emoticons/v2/25/static/dark/2.0"),
+                emote("Kappa", "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"),
                 text(" look "),
                 emote("OMEGALUL", "omg"),
                 text(" there"),
@@ -249,7 +312,7 @@ mod tests {
     #[ignore]
     async fn smoke_chat() {
         let client = reqwest::Client::new();
-        let msgs = load(&client, "2905205256", 600.0, 660.0).await.unwrap();
+        let msgs = load(&client, "2905205256", 600.0, 660.0, |_| {}).await.unwrap();
         assert!(msgs.len() > 50, "{} messages", msgs.len());
         assert!(msgs.windows(2).all(|w| w[0].time <= w[1].time));
         let with_badges = msgs.iter().filter(|m| !m.badges.is_empty()).count();

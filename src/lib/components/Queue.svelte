@@ -74,6 +74,28 @@
         </div>
       </li>
     {/each}
+    {#if app.merge}
+      {@const m = app.merge}
+      {@const failure = m.state === "failed" ? explain(m.error) : null}
+      <li>
+        <div class="row">
+          <span class="name">Все клипы одним роликом</span>
+          <span></span>
+          <span class="state" class:error={!!failure} title={failure?.detail}>
+            {#if m.state === "running"}
+              <span class="dim">Склеиваем…</span>
+            {:else if m.state === "done"}
+              Готово
+            {:else}
+              {failure?.text}
+            {/if}
+          </span>
+        </div>
+        <div class="bar" class:done={m.state === "done"} class:failed={m.state === "failed"}>
+          <div style:width="{m.state === 'running' ? 50 : 100}%"></div>
+        </div>
+      </li>
+    {/if}
   </ul>
 
   {#if error}

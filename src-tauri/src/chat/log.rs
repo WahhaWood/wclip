@@ -44,8 +44,16 @@ pub enum Error {
     Empty,
 }
 
+/// A Chatterino log or TwitchDownloader JSON, plain or gzipped (`.json.gz`).
 pub fn open(path: &Path) -> Result<ChatLog, Error> {
-    let text = std::fs::read_to_string(path)?;
+    let bytes = std::fs::read(path)?;
+    let text = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(bytes.as_slice()), &mut text)?;
+        text
+    } else {
+        String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+    };
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let log = if text.trim_start().starts_with('{') { twitch_downloader(&text)? } else { chatterino(&text, stem) };
     if log.comments.is_empty() {
@@ -353,6 +361,13 @@ mod tests {
         assert_eq!(a.message.fragments[1].emote.as_ref().unwrap().emote_id, "25");
         assert_eq!(a.message.user_badges[0].set_id, "subscriber");
         assert_eq!(text_of(&log.comments[1]), "plain", "body when there are no fragments");
+
+        let path = std::env::temp_dir().join(format!("wclip-test-{}.json.gz", std::process::id()));
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, text.as_bytes()).unwrap();
+        std::fs::write(&path, gz.finish().unwrap()).unwrap();
+        assert_eq!(open(&path).unwrap().info, log.info, "gzipped");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

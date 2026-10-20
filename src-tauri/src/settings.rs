@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::chat::ChatFilter;
+use crate::cut::ChatOutput;
+use crate::encode::Output;
 use crate::job::DEFAULT_TEMPLATE;
 use crate::overlay::OverlayStyle;
 
@@ -21,6 +24,11 @@ pub struct Settings {
     pub active_preset: Option<String>,
     /// Release the user chose to skip; its update banner is not shown again.
     pub skipped_version: Option<String>,
+    pub output: Output,
+    pub chat_output: ChatOutput,
+    /// Also join the clips of a job into one video.
+    pub merge: bool,
+    pub chat_filter: ChatFilter,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +47,10 @@ impl Default for Settings {
             presets: Vec::new(),
             active_preset: None,
             skipped_version: None,
+            output: Output::default(),
+            chat_output: ChatOutput::default(),
+            merge: false,
+            chat_filter: ChatFilter::default(),
         }
     }
 }
@@ -79,11 +91,14 @@ mod tests {
         assert_eq!(back.presets[0].style.font_size, 30.0);
         assert_eq!(back.active_preset.as_deref(), Some("big"));
 
-        std::fs::write(&path, r#"{"chat": false, "overlay": {"width": 300}}"#).unwrap();
+        std::fs::write(&path, r#"{"chat": false, "overlay": {"width": 300}, "output": {"codec": "hevc"}, "chatOutput": "both"}"#).unwrap();
         let partial = load(&path);
         assert!(!partial.chat);
         assert_eq!(partial.overlay.width, 300);
         assert_eq!(partial.overlay.height, OverlayStyle::default().height);
+        assert_eq!(partial.output.codec, crate::encode::Codec::Hevc);
+        assert_eq!(partial.output.encoder, crate::encode::Encoder::Auto);
+        assert_eq!(partial.chat_output, ChatOutput::Both);
 
         std::fs::write(&path, "not json").unwrap();
         assert!(load(&path).chat);

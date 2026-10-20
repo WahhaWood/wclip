@@ -17,6 +17,7 @@ use image::imageops::{self, FilterType};
 use tiny_skia::{IntSize, Pixmap, PixmapPaint, PremultipliedColorU8, Transform};
 
 use crate::chat::{ChatMessage, Part};
+use crate::images::Images;
 
 /// Embedded default font; placeholders always use it, whatever the text font.
 pub const FONT_FAMILY: &str = "Inter";
@@ -68,6 +69,25 @@ struct Slot {
     height: u32,
 }
 
+/// An animated emote left out of a `Block`: the overlay draws its current frame
+/// there on every video frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Moving {
+    pub url: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A rendered message.
+pub struct Block {
+    pub pixmap: Pixmap,
+    pub moving: Vec<Moving>,
+    /// Width of the longest line, pixels: what a background under the message spans.
+    pub content_width: f32,
+}
+
 /// Scanning the system fonts takes a while, so it is done once and cloned.
 static FONT_DB: LazyLock<fontdb::Database> = LazyLock::new(|| {
     let mut db = fontdb::Database::new();
@@ -107,22 +127,16 @@ impl Typesetter {
 
     /// Message laid out to `width` pixels in `family` (missing glyphs fall back to
     /// other fonts); images missing from `images` (failed downloads) fall back to
-    /// the emote name as text, or no badge.
-    pub fn render(
-        &mut self,
-        msg: &ChatMessage,
-        images: &HashMap<String, RgbaImage>,
-        family: &str,
-        font_size: f32,
-        width: u32,
-    ) -> Pixmap {
+    /// the emote name as text, or no badge. Animated images are not drawn but
+    /// listed in `Block::moving`.
+    pub fn render(&mut self, msg: &ChatMessage, images: &Images, family: &str, font_size: f32, width: u32) -> Block {
         let text_metrics = Metrics::new(font_size, (font_size * LINE_HEIGHT).round());
         let base = Attrs::new().family(Family::Name(family)).color(Color::rgba(255, 255, 255, 255));
         let mut slots: Vec<Slot> = Vec::new();
         let mut spans: Vec<(String, Attrs)> = Vec::new();
 
         let placeholder = |url: &str, height: f32, gap: f32, slots: &mut Vec<Slot>| -> Option<Attrs<'static>> {
-            let img = images.get(url)?;
+            let img = images.stills.get(url)?;
             let height = height.round().max(1.0) as u32;
             let width = ((img.width() as f32 * height as f32 / img.height().max(1) as f32).round() as u32).max(1);
             slots.push(Slot { url: url.to_owned(), width, height });
@@ -161,6 +175,7 @@ impl Typesetter {
         buffer.shape_until_scroll(&mut self.fonts, false);
 
         let height: f32 = buffer.layout_runs().map(|r| r.line_height).sum();
+        let content_width = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max);
         let mut pixmap = Pixmap::new(width, (height.ceil() as u32).max(1)).expect("non-zero size");
 
         let mut glyphs = Vec::new();
@@ -193,8 +208,17 @@ impl Typesetter {
                 }
             }
         }
+        let mut moving = Vec::new();
         for (slot, x, y) in emotes {
-            let image = self.scaled_image(&images[&slots[slot].url], &slots[slot]);
+            let slot = &slots[slot];
+            if images.animations.contains_key(&slot.url) {
+                moving.push(Moving { url: slot.url.clone(), x, y, width: slot.width, height: slot.height });
+                continue;
+            }
+            let image = self
+                .scaled
+                .entry((slot.url.clone(), slot.height))
+                .or_insert_with(|| scale(&images.stills[&slot.url], slot.width, slot.height));
             pixmap.draw_pixmap(x, y, image.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         }
         for (physical, color) in &glyphs {
@@ -202,23 +226,21 @@ impl Typesetter {
                 blend(&mut pixmap, physical.x + x, physical.y + y, [c.r(), c.g(), c.b(), c.a()]);
             });
         }
-        pixmap
+        Block { pixmap, moving, content_width }
     }
+}
 
-    fn scaled_image(&mut self, img: &RgbaImage, slot: &Slot) -> &Pixmap {
-        self.scaled.entry((slot.url.clone(), slot.height)).or_insert_with(|| {
-            let resized = imageops::resize(img, slot.width, slot.height, FilterType::CatmullRom);
-            let mut data = resized.into_raw();
-            for px in data.chunks_exact_mut(4) {
-                let a = u16::from(px[3]);
-                for c in &mut px[..3] {
-                    *c = ((u16::from(*c) * a + 127) / 255) as u8;
-                }
-            }
-            Pixmap::from_vec(data, IntSize::from_wh(slot.width, slot.height).expect("non-zero"))
-                .expect("size matches")
-        })
+/// `img` resized to `width` × `height`, premultiplied for drawing.
+pub fn scale(img: &RgbaImage, width: u32, height: u32) -> Pixmap {
+    let resized = imageops::resize(img, width, height, FilterType::CatmullRom);
+    let mut data = resized.into_raw();
+    for px in data.chunks_exact_mut(4) {
+        let a = u16::from(px[3]);
+        for c in &mut px[..3] {
+            *c = ((u16::from(*c) * a + 127) / 255) as u8;
+        }
     }
+    Pixmap::from_vec(data, IntSize::from_wh(width, height).expect("non-zero")).expect("size matches")
 }
 
 /// Source-over of a straight-alpha color onto the premultiplied pixmap.

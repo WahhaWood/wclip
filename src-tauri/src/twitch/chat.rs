@@ -129,13 +129,58 @@ fn parse_page(mut responses: Vec<Response>) -> Result<Page> {
     })
 }
 
+/// Seconds of VOD one worker pages through; ranges longer than this are split.
+const CHUNK: f64 = 120.0;
+/// Chunks downloaded at once.
+const WORKERS: usize = 32;
+
 /// Comments with `start <= offset < end` (seconds from VOD start), sorted by offset.
+/// Long ranges are fetched in `CHUNK`s, `WORKERS` at a time: paging is sequential
+/// and slow (30 min of a busy chat takes ~100 s, checked 2026-10-20).
+/// `on_progress` gets the share of chunks done, 0..=1.
 pub async fn fetch_comments(
     client: &reqwest::Client,
     video_id: &str,
     start: f64,
     end: f64,
+    on_progress: impl Fn(f64),
 ) -> Result<Vec<Comment>> {
+    let start = start.max(0.0);
+    let chunks: Vec<(f64, f64)> = chunks(start, end).collect();
+    let total = chunks.len();
+    let mut pending = chunks.into_iter();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut spawn_next = |tasks: &mut tokio::task::JoinSet<Result<Vec<Comment>>>| {
+        if let Some((a, b)) = pending.next() {
+            let (client, id) = (client.clone(), video_id.to_owned());
+            tasks.spawn(async move { fetch_range(&client, &id, a, b).await });
+        }
+    };
+    for _ in 0..WORKERS {
+        spawn_next(&mut tasks);
+    }
+    let mut out = Vec::new();
+    let mut done = 0;
+    while let Some(result) = tasks.join_next().await {
+        // A failed chunk fails the whole range; dropping `tasks` aborts the rest.
+        out.extend(result.map_err(|e| Error::Gql(e.to_string()))??);
+        done += 1;
+        on_progress(done as f64 / total as f64);
+        spawn_next(&mut tasks);
+    }
+    out.sort_by(|a, b| a.content_offset_seconds.total_cmp(&b.content_offset_seconds));
+    Ok(out)
+}
+
+/// `[start, end)` split into consecutive pieces of at most `CHUNK` seconds.
+fn chunks(start: f64, end: f64) -> impl Iterator<Item = (f64, f64)> {
+    let count = ((end - start) / CHUNK).ceil().max(1.0) as usize;
+    (0..count).map(move |i| (start + i as f64 * CHUNK, (start + (i + 1) as f64 * CHUNK).min(end)))
+}
+
+/// One range paged sequentially; comments outside `[start, end)` are dropped, so
+/// adjacent ranges never share a comment.
+async fn fetch_range(client: &reqwest::Client, video_id: &str, start: f64, end: f64) -> Result<Vec<Comment>> {
     let mut offset = start.max(0.0) as u32;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -157,7 +202,6 @@ pub async fn fetch_comments(
         // a page holds; step forward so we never loop on the same page.
         offset = if last > offset { last } else { offset + 1 };
     }
-    out.sort_by(|a, b| a.content_offset_seconds.total_cmp(&b.content_offset_seconds));
     Ok(out)
 }
 
@@ -178,6 +222,14 @@ mod tests {
         assert_eq!(c.message.user_badges[0].set_id, "subscriber");
         assert_eq!(c.message.fragments[1].emote.as_ref().unwrap().emote_id, "25");
         assert!(page.comments[2].commenter.is_none());
+    }
+
+    #[test]
+    fn splits_into_chunks() {
+        assert_eq!(chunks(10.0, 20.0).collect::<Vec<_>>(), [(10.0, 20.0)]);
+        let all: Vec<_> = chunks(0.0, 2.5 * CHUNK).collect();
+        assert_eq!(all, [(0.0, CHUNK), (CHUNK, 2.0 * CHUNK), (2.0 * CHUNK, 2.5 * CHUNK)]);
+        assert_eq!(chunks(0.0, 2.0 * CHUNK).count(), 2);
     }
 
     #[test]

@@ -5171,6 +5171,7 @@ name = "wclip"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "flate2",
  "fontdb",
  "image",
  "reqwest",

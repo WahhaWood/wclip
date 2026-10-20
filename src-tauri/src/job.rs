@@ -95,24 +95,43 @@ pub const DEFAULT_TEMPLATE: &str = "{channel}_{vod}_{start}";
 /// with `{channel}`, `{vod}`, `{start}`, `{end}` (`HH-MM-SS`) and `{n}` filled in;
 /// ` (2)`, ` (3)`… is appended if the file exists.
 pub fn clip_path(dir: &Path, template: &str, vod: &Vod, interval: &Interval, n: usize) -> PathBuf {
+    let base = if interval.name.trim().is_empty() {
+        fill_template(template, vod, interval, &n.to_string())
+    } else {
+        interval.name.trim().to_owned()
+    };
+    free_path(dir, &base)
+}
+
+/// Free output path for all clips of a job joined: `template` over the span of
+/// `intervals` with `{n}` as "all", and `_merged`.
+pub fn merged_path(dir: &Path, template: &str, vod: &Vod, intervals: &[Interval]) -> PathBuf {
+    let start = intervals.iter().map(|i| i.start).fold(f64::INFINITY, f64::min);
+    let end = intervals.iter().map(|i| i.end).fold(0.0, f64::max);
+    let span = Interval { start, end, name: String::new() };
+    free_path(dir, &format!("{}_merged", fill_template(template, vod, &span, "all")))
+}
+
+fn fill_template(template: &str, vod: &Vod, interval: &Interval, n: &str) -> String {
     let hms = |t: f64| {
         let s = t as u64;
         format!("{:02}-{:02}-{:02}", s / 3600, s / 60 % 60, s % 60)
     };
     let template = if template.trim().is_empty() { DEFAULT_TEMPLATE } else { template };
-    let base = if interval.name.trim().is_empty() {
-        template
-            .replace("{channel}", &vod.channel)
-            .replace("{vod}", &vod.id)
-            .replace("{start}", &hms(interval.start))
-            .replace("{end}", &hms(interval.end))
-            .replace("{n}", &n.to_string())
-            // A local video may have no channel: no `_name_...`.
-            .trim_matches(|c| c == '_' || c == '-' || c == ' ')
-            .to_owned()
-    } else {
-        interval.name.trim().to_owned()
-    };
+    template
+        .replace("{channel}", &vod.channel)
+        .replace("{vod}", &vod.id)
+        .replace("{start}", &hms(interval.start))
+        .replace("{end}", &hms(interval.end))
+        .replace("{n}", n)
+        // A local video may have no channel: no `_name_...`.
+        .trim_matches(|c| c == '_' || c == '-' || c == ' ')
+        .to_owned()
+}
+
+/// `<dir>/<base>.mp4` with characters no file system takes replaced, and ` (2)`,
+/// ` (3)`… appended while the file exists.
+fn free_path(dir: &Path, base: &str) -> PathBuf {
     let base: String = base
         .chars()
         .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
@@ -222,6 +241,10 @@ mod tests {
         assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1), dir.join("a_b_ c_.mp4"));
         std::fs::write(dir.join("a_b_ c_.mp4"), b"").unwrap();
         assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1), dir.join("a_b_ c_ (2).mp4"));
+
+        let ivs = [Interval { start: 70.0, end: 80.0, name: "x".into() }, Interval { start: 10.0, end: 20.0, name: String::new() }];
+        assert_eq!(merged_path(&dir, "", &job.vod, &ivs), dir.join("chan_1_00-00-10_merged.mp4"));
+        assert_eq!(merged_path(&dir, custom, &job.vod, &ivs), dir.join("all. chan 00-00-10-00-01-20_merged.mp4"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

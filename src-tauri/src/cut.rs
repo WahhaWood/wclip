@@ -4,24 +4,21 @@
 //! (checked 2026-10-20), so frame 0 of a clip is exactly the interval start and no
 //! temporary download is needed.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
-use image::RgbaImage;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::chat::{self, ChatMessage, Part};
+use crate::encode::Output;
 use crate::failure::{self, Kind};
-use crate::images::ImageCache;
+use crate::images::{ImageCache, Images};
 use crate::job::{Interval, Vod};
 use crate::overlay::{self, Overlay, OverlayStyle};
 use crate::tools::{self, Tools};
-
-const CRF: &str = "18";
-const PRESET: &str = "veryfast";
 
 /// HLS input options: give up on a stalled read after 20 s, retry a failed
 /// segment 3 times before the demuxer skips it.
@@ -145,7 +142,7 @@ pub struct ChatOverlay {
     /// Already scaled to the video height.
     pub style: OverlayStyle,
     pub messages: Vec<ChatMessage>,
-    pub images: HashMap<String, RgbaImage>,
+    pub images: Images,
 }
 
 /// JPEG of the video frame at VOD time `t`, 960 px wide, for the overlay preview.
@@ -175,13 +172,14 @@ pub async fn load_chat(
 ) -> crate::twitch::Result<ChatOverlay> {
     let style = style.scaled(vod.height.unwrap_or(1080));
     let start = (interval.start - style.lookback()).max(0.0);
-    let messages = chat::load(client, &vod.id, start, interval.end).await?;
+    let messages = chat::load(client, &vod.id, start, interval.end, |_| {}).await?;
     Ok(with_images(cache, style, messages).await)
 }
 
-/// Like `load_chat`, from the messages of a chat log (`chat::from_log`). Lookback
-/// may reach before the video: the chat went on before the recording started.
-pub async fn log_chat(cache: &ImageCache, vod: &Vod, interval: &Interval, style: &OverlayStyle, all: &[ChatMessage]) -> ChatOverlay {
+/// Like `load_chat`, from messages already loaded: a chat log (`chat::from_log`) or
+/// the whole VOD's chat. Lookback may reach before the video: the chat went on
+/// before the recording started.
+pub async fn chat_from(cache: &ImageCache, vod: &Vod, interval: &Interval, style: &OverlayStyle, all: &[ChatMessage]) -> ChatOverlay {
     let style = style.scaled(vod.height.unwrap_or(1080));
     let start = interval.start - style.lookback();
     let messages = all.iter().filter(|m| m.time >= start && m.time < interval.end).cloned().collect();
@@ -203,47 +201,82 @@ async fn with_images(cache: &ImageCache, style: OverlayStyle, messages: Vec<Chat
     ChatOverlay { style, messages, images }
 }
 
-/// Encodes `interval` of the VOD into `out` (MP4), with the chat on top if given.
-/// `on_progress` gets 0..=1. Dropping the future kills ffmpeg and removes the
-/// partial file.
+/// Where the chat of a clip goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatOutput {
+    /// Into the video.
+    #[default]
+    Burn,
+    /// A separate video with transparency next to the clip (see `chat_path`), for editing.
+    File,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CutOptions {
+    /// `Encoder::Auto` encodes on the CPU; resolve it first (`encode::resolve`).
+    pub video: Output,
+    pub chat: ChatOutput,
+}
+
+/// The chat of clip `out` as its own video: ProRes 4444 keeps the transparency and
+/// every editor reads it.
+pub fn chat_path(out: &Path) -> PathBuf {
+    out.with_extension("chat.mov")
+}
+
+/// Encodes `interval` of the VOD into `out` (MP4), with the chat on top and/or
+/// next to it (`options.chat`) if given. `on_progress` gets 0..=1. Dropping the
+/// future kills ffmpeg and removes the partial files.
 pub async fn cut(
     tools: &Tools,
     playlist: &str,
     interval: &Interval,
     chat: Option<ChatOverlay>,
+    options: CutOptions,
     out: &Path,
     on_progress: impl Fn(f64),
 ) -> Result<()> {
     let length = interval.end - interval.start;
+    let video = options.video.args();
+    let burn = chat.is_some() && options.chat != ChatOutput::File;
+    let chat_part = (chat.is_some() && options.chat != ChatOutput::Burn).then(|| PartFile(chat_path(out).with_extension("mov.part")));
     let part = PartFile(out.with_extension("mp4.part"));
     let mut cmd = tokio_command(&tools.ffmpeg);
     // Warnings too: that is where the demuxer reports a skipped segment.
     cmd.args(["-hide_banner", "-nostdin", "-loglevel", "level+warning", "-nostats", "-progress", "pipe:1"])
+        .args(&video.global)
         .args(input_args(playlist))
         .args(["-ss", &interval.start.to_string(), "-i", playlist]);
-    match &chat {
+    let graph = match &chat {
         Some(chat) => {
             let (w, h) = (chat.style.width, chat.style.height);
             let (x, y) = chat.style.position();
             cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}")])
                 .args(["-framerate", &overlay::FPS.to_string(), "-i", "pipe:0"])
-                .args(["-filter_complex", &format!("[0:v][1:v]overlay=x={x}:y={y}:eof_action=repeat[v]")])
-                .args(["-map", "[v]"])
                 .stdin(Stdio::piped());
+            if burn {
+                format!("[0:v][1:v]overlay=x={x}:y={y}:eof_action=repeat,{}[v]", video.filter)
+            } else {
+                format!("[0:v]{}[v]", video.filter)
+            }
         }
         None => {
-            cmd.args(["-map", "0:v:0"]).stdin(Stdio::null());
+            cmd.stdin(Stdio::null());
+            format!("[0:v]{}[v]", video.filter)
         }
-    }
-    let mut child = cmd
-        .args(["-map", "0:a:0?", "-t", &length.to_string()])
-        .args(["-c:v", "libx264", "-preset", PRESET, "-crf", CRF, "-pix_fmt", "yuv420p"])
+    };
+    cmd.args(["-filter_complex", &graph, "-map", "[v]", "-map", "0:a:0?", "-t", &length.to_string()])
+        .args(&video.codec)
         .args(["-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-f", "mp4", "-y"])
-        .arg(&part.0)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .arg(&part.0);
+    if let Some(chat_part) = &chat_part {
+        cmd.args(["-map", "1:v", "-t", &length.to_string()])
+            .args(["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-f", "mov", "-y"])
+            .arg(&chat_part.0);
+    }
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
 
     // Overlay frame k shows VOD time start + k / FPS, matching clip frame time k / FPS.
     let mut frames = chat.map(|chat| {
@@ -299,7 +332,37 @@ pub async fn cut(
         return Err(Error::SegmentSkipped(strip_level(line)));
     }
     std::fs::rename(&part.0, out)?;
+    if let Some(chat_part) = &chat_part {
+        std::fs::rename(&chat_part.0, chat_path(out))?;
+    }
     on_progress(1.0);
+    Ok(())
+}
+
+/// Joins `clips` (cut from one video with the same settings, so no re-encoding)
+/// into `out`, in order.
+pub async fn concat(tools: &Tools, clips: &[PathBuf], out: &Path) -> Result<()> {
+    let part = PartFile(out.with_extension("mp4.part"));
+    let list = PartFile(out.with_extension("concat.txt"));
+    // Single quotes keep everything literal but a quote, which ends and reopens them.
+    let text: String = clips
+        .iter()
+        .map(|c| format!("file '{}'\n", c.to_string_lossy().replace('\'', r"'\''")))
+        .collect();
+    std::fs::write(&list.0, text)?;
+    let output = tokio_command(&tools.ffmpeg)
+        .args(["-hide_banner", "-nostdin", "-loglevel", "level+error", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&list.0)
+        .args(["-map", "0", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", "-y"])
+        .arg(&part.0)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(Error::Tool(format!("ffmpeg: {}", last_error(&String::from_utf8_lossy(&output.stderr)))));
+    }
+    std::fs::rename(&part.0, out)?;
     Ok(())
 }
 
@@ -343,6 +406,8 @@ fn strip_level(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::RgbaImage;
+    use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
     fn smoke_dir(name: &str) -> PathBuf {
@@ -379,17 +444,17 @@ mod tests {
 
         let started = Instant::now();
         let chat = load_chat(&client, &cache, &vod, &interval, &OverlayStyle::default()).await.unwrap();
-        println!("chat: {} messages, {} images, {:?}", chat.messages.len(), chat.images.len(), started.elapsed());
+        println!("chat: {} messages, {} images ({} animated), {:?}", chat.messages.len(), chat.images.stills.len(), chat.images.animations.len(), started.elapsed());
 
         let out = dir.join("clip.mp4");
         let started = Instant::now();
-        cut(&tools, &vod.playlist, &interval, Some(chat), &out, |_| {}).await.unwrap();
+        cut(&tools, &vod.playlist, &interval, Some(chat), CutOptions::default(), &out, |_| {}).await.unwrap();
         let took = started.elapsed().as_secs_f64();
         println!("encode: {took:.1} s for 10 s ({:.2}x real time)", 10.0 / took);
 
         let plain = dir.join("plain.mp4");
         let started = Instant::now();
-        cut(&tools, &vod.playlist, &interval, None, &plain, |_| {}).await.unwrap();
+        cut(&tools, &vod.playlist, &interval, None, CutOptions::default(), &plain, |_| {}).await.unwrap();
         println!("without chat: {:.1} s", started.elapsed().as_secs_f64());
 
         let frame = frame_at(&tools, &out, 9.0);
@@ -419,10 +484,10 @@ mod tests {
         let chat = ChatOverlay {
             style,
             messages: vec![message],
-            images: HashMap::from([("m".to_owned(), RgbaImage::from_pixel(300, 100, magenta))]),
+            images: HashMap::from([("m".to_owned(), RgbaImage::from_pixel(300, 100, magenta))]).into(),
         };
         let out = dir.join("clip.mp4");
-        cut(&tools, &vod.playlist, &interval, Some(chat), &out, |_| {}).await.unwrap();
+        cut(&tools, &vod.playlist, &interval, Some(chat), CutOptions::default(), &out, |_| {}).await.unwrap();
 
         // Only the panel (black background), so magenta in the video itself does not count.
         let magenta_pixels = |img: &RgbaImage| {
@@ -478,11 +543,11 @@ mod tests {
         let interval = Interval { start: 1.0, end: 5.0, name: String::new() };
         let style = OverlayStyle { lifetime: 10.0, ..OverlayStyle::default() };
         let cache = ImageCache::new(dir.join("images"), reqwest::Client::new());
-        let chat = log_chat(&cache, &vod, &interval, &style, &all).await;
+        let chat = chat_from(&cache, &vod, &interval, &style, &all).await;
         assert_eq!(chat.messages.len(), 1, "the early one is out of lookback");
         let (x, y, w, h) = (chat.style.x, chat.style.y, chat.style.width, chat.style.height);
         let out = dir.join("clip.mp4");
-        cut(&tools, &vod.playlist, &interval, Some(chat), &out, |_| {}).await.unwrap();
+        cut(&tools, &vod.playlist, &interval, Some(chat), CutOptions::default(), &out, |_| {}).await.unwrap();
 
         let bright = |img: &RgbaImage| {
             let panel = image::imageops::crop_imm(img, x, y, w, h).to_image();
@@ -510,7 +575,7 @@ mod tests {
         assert!(vod.duration > 1000.0);
         let interval = Interval { start: 600.0, end: 630.0, name: String::new() };
         let out = dir.join("clip.mp4");
-        cut(&tools, &vod.playlist, &interval, None, &out, |_| {}).await.unwrap();
+        cut(&tools, &vod.playlist, &interval, None, CutOptions::default(), &out, |_| {}).await.unwrap();
 
         let probe = tools::command(&tools.ffprobe)
             .args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"])
@@ -536,7 +601,7 @@ mod tests {
         let out = dir.join("clip.mp4");
         let part = out.with_extension("mp4.part");
 
-        let run = cut(&tools, &vod.playlist, &interval, None, &out, |_| {});
+        let run = cut(&tools, &vod.playlist, &interval, None, CutOptions::default(), &out, |_| {});
         let timed_out = tokio::time::timeout(Duration::from_secs(5), run).await.is_err();
         assert!(timed_out, "300 s clip should not finish in 5 s");
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -566,14 +631,73 @@ mod tests {
         let interval = Interval { start: 1.0, end: 10.0, name: String::new() };
 
         let whole = dir.join("whole.mp4");
-        cut(&tools, &playlist, &interval, None, &whole, |_| {}).await.unwrap();
+        cut(&tools, &playlist, &interval, None, CutOptions::default(), &whole, |_| {}).await.unwrap();
 
         std::fs::remove_file(dir.join("v2.ts")).unwrap();
         let out = dir.join("holed.mp4");
-        let err = cut(&tools, &playlist, &interval, None, &out, |_| {}).await.unwrap_err();
+        let err = cut(&tools, &playlist, &interval, None, CutOptions::default(), &out, |_| {}).await.unwrap_err();
         assert!(matches!(err, Error::SegmentSkipped(_)), "{err}");
         assert_eq!(err.kind(), Kind::Network);
         assert!(!out.exists() && !out.with_extension("mp4.part").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn probe(tools: &Tools, file: &Path, entries: &str) -> String {
+        let out = tools::command(&tools.ffprobe)
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", entries, "-of", "csv=p=0"])
+            .arg(file)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// The chat as its own file, the GPU encoder `Auto` picks and joining clips;
+    /// offline, ffmpeg from `PATH`: `cargo test -- --ignored smoke_outputs --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn smoke_outputs() {
+        let dir = smoke_dir("outputs");
+        let tools = Tools { ffmpeg: "ffmpeg".into(), ffprobe: "ffprobe".into(), yt_dlp: "yt-dlp".into() };
+        let source = dir.join("source.mp4");
+        let ok = tools::command(&tools.ffmpeg)
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=6"])
+            .args(["-f", "lavfi", "-i", "sine=d=6", "-c:v", "libx264", "-c:a", "aac", "-shortest"])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let gpus = crate::encode::available(&tools, crate::encode::Codec::H264).await;
+        let video = crate::encode::resolve(Output::default(), &gpus);
+        println!("GPU encoders {gpus:?}, using {:?}", video.encoder);
+
+        let message = ChatMessage {
+            time: 1.0,
+            name: "alice".into(),
+            color: [255, 255, 255],
+            badges: Vec::new(),
+            parts: vec![Part::Text("hello".into())],
+        };
+        let style = OverlayStyle::default().scaled(720);
+        let chat = ChatOverlay { style: style.clone(), messages: vec![message], images: Images::default() };
+        let options = CutOptions { video, chat: ChatOutput::Both };
+        let playlist = source.to_string_lossy().into_owned();
+        let (a, b) = (dir.join("a.mp4"), dir.join("b.mp4"));
+        for (out, start) in [(&a, 0.5), (&b, 3.0)] {
+            let interval = Interval { start, end: start + 2.0, name: String::new() };
+            cut(&tools, &playlist, &interval, Some(chat.clone()), options, out, |_| {}).await.unwrap();
+        }
+        let chat_file = chat_path(&a);
+        // ProRes 4444 decodes as 12 bit whatever it was encoded from.
+        let stream = probe(&tools, &chat_file, "stream=codec_name,width,pix_fmt");
+        assert!(stream.starts_with(&format!("prores,{},yuva444", style.width)), "{stream}");
+        assert!((probe(&tools, &chat_file, "format=duration").parse::<f64>().unwrap() - 2.0).abs() < 0.1);
+        assert!(!chat_file.with_extension("mov.part").exists());
+
+        let merged = dir.join("merged.mp4");
+        concat(&tools, &[a, b], &merged).await.unwrap();
+        let duration: f64 = probe(&tools, &merged, "format=duration").parse().unwrap();
+        assert!((duration - 4.0).abs() < 0.1, "merged {duration}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

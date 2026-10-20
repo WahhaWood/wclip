@@ -48,6 +48,27 @@ pub async fn user_id(client: &reqwest::Client, login: &str) -> Result<Option<Str
     Ok(data.user.map(|u| u.id))
 }
 
+/// Emote id by name of Twitch's global emotes (Kappa, LUL…). Channel emote sets
+/// come back empty without a login (checked 2026-10-20), so only these.
+pub async fn global_emotes(client: &reqwest::Client) -> Result<HashMap<String, String>> {
+    #[derive(Deserialize)]
+    struct Data {
+        #[serde(rename = "emoteSet")]
+        emote_set: Option<Set>,
+    }
+    #[derive(Deserialize)]
+    struct Set {
+        emotes: Vec<Emote>,
+    }
+    #[derive(Deserialize)]
+    struct Emote {
+        id: String,
+        token: String,
+    }
+    let data: Data = query(client, r#"query{emoteSet(id:"0"){emotes{id token}}}"#, json!({})).await?;
+    Ok(data.emote_set.map(|s| s.emotes).unwrap_or_default().into_iter().map(|e| (e.token, e.id)).collect())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BadgeImage {

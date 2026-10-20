@@ -6,9 +6,12 @@
   import { explain } from "$lib/errors";
   import { app, newRow, runJob, type Row } from "$lib/state.svelte";
   import { formatClock, formatTime, parseClock, parseIntervalList, parseTime } from "$lib/time";
+  import Frame from "./Frame.svelte";
+  import Moments from "./Moments.svelte";
 
   const VIDEO = ["mp4", "mkv", "mov", "flv", "ts", "webm", "avi"];
-  const CHAT_LOG = ["log", "json", "txt"];
+  const CHAT_OUTPUT = { burn: "Чат в кадре", file: "Чат отдельным файлом", both: "Чат в кадре и файлом" };
+  const CHAT_LOG = ["log", "json", "gz", "txt"];
 
   let link = $state("");
   let loading = $state(false);
@@ -20,6 +23,8 @@
   let dragging = $state(false);
   /** Chat time at 0:00 of a local video, as typed. */
   let syncText = $state("");
+  /** Row whose start and end frames are shown. */
+  let editing = $state<number | null>(null);
 
   /** `field` is the input to highlight. An empty row is neither valid nor an error. */
   type Check = { interval: Interval | null; error: string | null; field: "start" | "end" | null };
@@ -43,6 +48,9 @@
     if (!log) return null;
     return log.info.clock ? parseClock(syncText, log.info.start) : parseTime(syncText);
   });
+  const chatLogRef = $derived(
+    app.vod?.local && app.chatLog && syncStart !== null ? { path: app.chatLog.path, start: syncStart } : null,
+  );
   /** A local video without a chat log is cut without chat. */
   const withChat = $derived(!!app.settings?.chat && (!app.vod?.local || !!app.chatLog));
   const ready = $derived(
@@ -126,6 +134,13 @@
     }
   }
 
+  /** Moves a row's start or end by `d` seconds, within the video. */
+  function nudge(row: Row, field: "start" | "end", d: number) {
+    const t = parseTime(row[field]);
+    if (t === null || !app.vod) return;
+    row[field] = formatTime(Math.max(0, Math.min(t + d, app.vod.duration)));
+  }
+
   function addPasted() {
     const { intervals, bad } = parseIntervalList(pasteText);
     const kept = app.rows.filter((r) => r.start.trim() || r.end.trim() || r.name.trim());
@@ -151,12 +166,13 @@
     error = null;
     try {
       app.queueVod = app.vod;
-      app.queueChatLog =
-        app.vod.local && app.chatLog && syncStart !== null ? { path: app.chatLog.path, start: syncStart } : null;
+      app.queueChatLog = chatLogRef;
       app.queue = intervals.map((interval) => ({ interval, status: { state: "waiting" } }));
+      app.merge = null;
       await runJob(
         intervals.map((_, i) => i),
         withChat ? $state.snapshot(s.overlay) : null,
+        s.merge && intervals.length > 1,
       );
       app.screen = "queue";
     } catch (e) {
@@ -210,7 +226,7 @@
               · {app.chatLog.info.count} сообщ.{app.chatLog.info.channel ? ` · ${app.chatLog.info.channel}` : ""}
             </span>
           {:else}
-            <span class="dim">лог Chatterino (.log) или TwitchDownloader (.json)</span>
+            <span class="dim">лог Chatterino (.log) или TwitchDownloader (.json, .json.gz)</span>
           {/if}
           <button class="btn small" onclick={pickChatLog}>{app.chatLog ? "Другой…" : "Выбрать…"}</button>
         </div>
@@ -230,6 +246,8 @@
   </section>
 
   {#if app.vod}
+    <Moments vod={app.vod} chatLog={chatLogRef} />
+
     <section class="glass card">
       <div class="head">
         <h2>Интервалы</h2>
@@ -256,7 +274,7 @@
 
       <div class="rows">
         <div class="row header dim">
-          <span>№</span><span>Начало</span><span>Конец</span><span>Длина</span><span>Имя клипа</span><span></span>
+          <span>№</span><span>Начало</span><span>Конец</span><span>Длина</span><span>Имя клипа</span><span></span><span></span>
         </div>
         {#each app.rows as row, i (row.id)}
           {@const c = checks[i]}
@@ -266,10 +284,33 @@
             <input class="field" class:invalid={c?.field === "end"} placeholder="0:00:30" bind:value={row.end} />
             <span class="dim">{c?.interval ? formatTime(c.interval.end - c.interval.start) : "—"}</span>
             <input class="field" placeholder="необязательно" bind:value={row.name} />
+            <button
+              class="btn small"
+              class:selected={editing === row.id}
+              title="Подогнать начало и конец по кадрам"
+              disabled={!c?.interval}
+              onclick={() => (editing = editing === row.id ? null : row.id)}>Кадры</button
+            >
             <button class="btn small" title="Удалить" onclick={() => app.rows.splice(i, 1)}>✕</button>
           </div>
           {#if c?.error}
             <p class="error row-error">{c.error}</p>
+          {/if}
+          {#if editing === row.id && c?.interval}
+            <div class="frames">
+              {#each [["start", "Начало", c.interval.start], ["end", "Конец", c.interval.end]] as const as [field, label, t] (field)}
+                <div class="frame-edit">
+                  <!-- The end is exclusive: its last frame is just before it. -->
+                  <Frame playlist={app.vod.playlist} time={field === "end" ? Math.max(0, t - 0.05) : t} />
+                  <div class="nudge">
+                    <span class="dim">{label} {formatTime(t)}</span>
+                    {#each [-5, -1, 1, 5] as d (d)}
+                      <button class="btn small" onclick={() => nudge(row, field, d)}>{d > 0 ? `+${d}` : d}</button>
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            </div>
           {/if}
         {/each}
       </div>
@@ -279,13 +320,19 @@
       <section class="glass card footer">
         <label class="toggle">
           <input type="checkbox" bind:checked={app.settings.chat} />
-          Чат в кадре
+          {CHAT_OUTPUT[app.settings.chatOutput]}
           {#if app.settings.chat && app.vod.local && !app.chatLog}
             <span class="dim">· нет лога чата</span>
           {:else if app.settings.chat && app.settings.activePreset}
             <span class="dim">· {app.settings.activePreset}</span>
           {/if}
         </label>
+        {#if intervals.length > 1}
+          <label class="toggle" title="Клипы останутся и по отдельности">
+            <input type="checkbox" bind:checked={app.settings.merge} />
+            Склеить
+          </label>
+        {/if}
         <div class="out">
           <span class="dim">Папка:</span>
           <!-- rtl clips the start of a long path; bdi keeps the path itself left-to-right. -->
@@ -388,9 +435,32 @@
 
   .row {
     display: grid;
-    grid-template-columns: 28px 120px 120px 72px 1fr auto;
+    grid-template-columns: 28px 120px 120px 72px 1fr auto auto;
     gap: 10px;
     align-items: center;
+  }
+
+  .frames {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 0 0 8px 38px;
+  }
+
+  .frame-edit {
+    display: grid;
+    gap: 6px;
+  }
+
+  .nudge {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .nudge .dim {
+    flex: 1;
+    font-size: 13px;
   }
 
   .row.header {

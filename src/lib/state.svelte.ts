@@ -7,12 +7,14 @@ import {
   type ClipEvent,
   type Failure,
   type Interval,
+  type MergeEvent,
   type OverlayStyle,
   type Settings,
   type UpdateInfo,
   type UpdateProgress,
   type Vod,
 } from "./api";
+import { formatTime } from "./time";
 
 export type Screen = "home" | "queue" | "settings";
 
@@ -28,6 +30,14 @@ export type ClipState =
   | { state: "failed"; error: Failure };
 
 export type QueueItem = { interval: Interval; status: ClipState };
+
+/** Chat of the whole video, for finding moments. */
+export type ChatState =
+  | { state: "idle" }
+  | { state: "loading"; fraction: number }
+  | { state: "ready"; count: number }
+  /** `error` as thrown by the command, for `explain`. */
+  | { state: "failed"; error: unknown };
 
 export type UpdateState =
   | { state: "found" }
@@ -45,10 +55,14 @@ export const app = $state({
   /** Chat log picked for a local video. */
   chatLog: null as { path: string; info: ChatLogInfo } | null,
   rows: [] as Row[],
+  /** `key` (see `chatKey`) of the video the chat is for. */
+  chat: { key: null as string | null, status: { state: "idle" } as ChatState },
   /** VOD of the queue: the home screen may already show another one. */
   queueVod: null as Vod | null,
   queueChatLog: null as ChatLogRef | null,
   queue: [] as QueueItem[],
+  /** Joining the clips of the queue into one video, once started. */
+  merge: null as MergeEvent | null,
   /** Queue index of each interval of the running job, by its index in the job. */
   jobItems: [] as number[],
   running: false,
@@ -61,6 +75,18 @@ export function newRow(start = "", end = "", name = ""): Row {
   return { id: nextRow++, start, end, name };
 }
 
+/** Adds an interval row after the filled ones, dropping empty rows. */
+export function addInterval(start: number, end: number, name = "") {
+  const kept = app.rows.filter((r) => r.start.trim() || r.end.trim() || r.name.trim());
+  app.rows = [...kept, newRow(formatTime(Math.round(start)), formatTime(Math.round(end)), name)];
+}
+
+/** Which chat a video has, as `chat_key` on the Rust side; `null` for a local video without a log. */
+export function chatKey(vod: Vod, log: ChatLogRef | null): string | null {
+  if (!vod.local) return `vod:${vod.id}`;
+  return log ? `log:${log.path}@${log.start}` : null;
+}
+
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** Saves the settings a moment after the last change. */
@@ -71,8 +97,11 @@ export function saveSettings() {
   }, 400);
 }
 
-/** Cuts queue items `items` (indices into `app.queue`) of `app.queueVod`; rejects with a `Failure`. */
-export async function runJob(items: number[], overlay: OverlayStyle | null) {
+/**
+ * Cuts queue items `items` (indices into `app.queue`) of `app.queueVod`, joining
+ * them afterwards if `merge`; rejects with a `Failure`.
+ */
+export async function runJob(items: number[], overlay: OverlayStyle | null, merge = false) {
   const s = app.settings;
   if (!app.queueVod || !s) return;
   const job = {
@@ -80,9 +109,10 @@ export async function runJob(items: number[], overlay: OverlayStyle | null) {
     intervals: items.map((i) => $state.snapshot(app.queue[i].interval)),
     chat_log: $state.snapshot(app.queueChatLog),
   };
+  const options = { output: $state.snapshot(s.output), chatOutput: s.chatOutput, merge, filter: $state.snapshot(s.chatFilter) };
   for (const i of items) app.queue[i].status = { state: "waiting" };
   app.jobItems = items;
-  await api.jobStart(job, overlay, s.outDir, s.nameTemplate);
+  await api.jobStart(job, overlay, s.outDir, s.nameTemplate, options);
   app.running = true;
 }
 
@@ -94,6 +124,12 @@ export async function initApp() {
     if (!item) return;
     const { index: _, ...status } = e;
     item.status = status;
+  });
+  await listen<MergeEvent>("merge", ({ payload }) => {
+    app.merge = payload;
+  });
+  await listen<number>("chat-progress", ({ payload: fraction }) => {
+    if (app.chat.status.state === "loading") app.chat.status = { state: "loading", fraction };
   });
   await listen("job-done", () => {
     app.running = false;

@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use tiny_skia::{Color, Pixmap, PixmapPaint, Transform};
 
 use crate::chat::ChatMessage;
+use crate::images::Images;
 use feed::Feed;
-use text::Typesetter;
+use text::{Block, Typesetter};
 
 /// Overlay frame rate, that of most Twitch VODs: at 30 a scrolling chat stutters
 /// over 60 fps video. ffmpeg matches it to the video by timestamps.
@@ -33,6 +34,8 @@ pub struct OverlayStyle {
     pub font_size: f32,
     /// Panel background opacity, 0..=1.
     pub background: f32,
+    /// Opacity of a rounded dark plate under each message, 0..=1; 0 draws none.
+    pub message_background: f32,
     /// Seconds a message stays; 0 keeps it until pushed out.
     pub lifetime: f64,
 }
@@ -48,6 +51,7 @@ impl Default for OverlayStyle {
             font: text::FONT_FAMILY.to_owned(),
             font_size: 22.0,
             background: 0.0,
+            message_background: 0.0,
             lifetime: 0.0,
         }
     }
@@ -82,23 +86,27 @@ impl OverlayStyle {
 pub struct Overlay {
     style: OverlayStyle,
     messages: Vec<ChatMessage>,
-    images: HashMap<String, RgbaImage>,
+    images: Images,
     feed: Feed,
     typesetter: Typesetter,
     /// Rendered messages by index; dropped once scrolled away.
-    blocks: HashMap<usize, Pixmap>,
+    blocks: HashMap<usize, Block>,
+    /// Scaled animation frames by (url, frame, height).
+    frames: HashMap<(String, usize, u32), Pixmap>,
     canvas: Pixmap,
     last: Option<(Vec<feed::Placed>, Arc<Vec<u8>>)>,
 }
 
 impl Overlay {
     /// `style` already scaled to the video. `messages` sorted by time.
-    pub fn new(style: OverlayStyle, messages: Vec<ChatMessage>, images: HashMap<String, RgbaImage>) -> Self {
+    pub fn new(style: OverlayStyle, messages: Vec<ChatMessage>, images: Images) -> Self {
         let pad = Self::padding(&style);
         let times: Vec<f64> = messages.iter().map(|m| m.time).collect();
+        // Plates under messages need room between them.
+        let gap = if style.message_background > 0.0 { 0.5 } else { 0.3 };
         let feed = Feed {
             times: Feed::spread(&times),
-            gap: (style.font_size * 0.3).round(),
+            gap: (style.font_size * gap).round(),
             bottom: style.height as f32 - pad,
             lifetime: (style.lifetime > 0.0).then_some(style.lifetime),
         };
@@ -110,6 +118,7 @@ impl Overlay {
             feed,
             typesetter: Typesetter::new(),
             blocks: HashMap::new(),
+            frames: HashMap::new(),
             canvas,
             last: None,
         }
@@ -119,8 +128,8 @@ impl Overlay {
         (style.font_size * 0.5).round()
     }
 
-    /// Straight-alpha RGBA of the panel at VOD time `t`. A still feed returns the
-    /// previous buffer without drawing.
+    /// Straight-alpha RGBA of the panel at VOD time `t`. A still feed without
+    /// animated emotes returns the previous buffer without drawing.
     pub fn frame(&mut self, t: f64) -> Arc<Vec<u8>> {
         let pad = Self::padding(&self.style);
         let width = self.style.width - 2 * pad as u32;
@@ -130,11 +139,14 @@ impl Overlay {
             blocks
                 .entry(i)
                 .or_insert_with(|| typesetter.render(&messages[i], images, &style.font, style.font_size, width))
+                .pixmap
                 .height() as f32
         });
 
+        let moving = placed.iter().any(|p| !self.blocks[&p.index].moving.is_empty());
         if let Some((prev, buf)) = &self.last
             && *prev == placed
+            && !moving
         {
             return Arc::clone(buf);
         }
@@ -144,16 +156,58 @@ impl Overlay {
 
         let alpha = (self.style.background.clamp(0.0, 1.0) * 255.0).round() as u8;
         self.canvas.fill(Color::from_rgba8(0, 0, 0, alpha));
+        let plate = self.style.message_background.clamp(0.0, 1.0);
+        let inset = (self.style.font_size * 0.35).round();
         for p in placed.iter().rev() {
-            let paint = PixmapPaint { opacity: f32::from(p.alpha) / 255.0, ..PixmapPaint::default() };
+            let opacity = f32::from(p.alpha) / 255.0;
+            let paint = PixmapPaint { opacity, ..PixmapPaint::default() };
             let block = &self.blocks[&p.index];
-            self.canvas.draw_pixmap(pad as i32, p.y, block.as_ref(), &paint, Transform::identity(), None);
+            if plate > 0.0 {
+                let (w, h) = (block.content_width + 2.0 * inset, block.pixmap.height() as f32 + inset);
+                let rect = tiny_skia::Rect::from_xywh(pad - inset, p.y as f32 - inset / 2.0, w, h);
+                if let Some(path) = rect.and_then(|r| rounded(r, inset)) {
+                    let mut fill = tiny_skia::Paint::default();
+                    fill.set_color(Color::from_rgba(0.0, 0.0, 0.0, plate * opacity).expect("in range"));
+                    fill.anti_alias = true;
+                    self.canvas.fill_path(&path, &fill, tiny_skia::FillRule::Winding, Transform::identity(), None);
+                }
+            }
+            self.canvas.draw_pixmap(pad as i32, p.y, block.pixmap.as_ref(), &paint, Transform::identity(), None);
+            for m in &block.moving {
+                let animation = &self.images.animations[&m.url];
+                let k = animation.index_at(t);
+                let frame = self
+                    .frames
+                    .entry((m.url.clone(), k, m.height))
+                    .or_insert_with(|| text::scale(&animation.frames[k], m.width, m.height));
+                self.canvas.draw_pixmap(pad as i32 + m.x, p.y + m.y, frame.as_ref(), &paint, Transform::identity(), None);
+            }
         }
 
         let buf = Arc::new(demultiply(self.canvas.data()));
         self.last = Some((placed, Arc::clone(&buf)));
         buf
     }
+}
+
+/// `rect` with corners rounded by `radius`.
+fn rounded(rect: tiny_skia::Rect, radius: f32) -> Option<tiny_skia::Path> {
+    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    let (l, t, rt, b) = (rect.left(), rect.top(), rect.right(), rect.bottom());
+    // Control points of a quarter circle drawn as one cubic.
+    let k = r * 0.552_284_8;
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(l + r, t);
+    pb.line_to(rt - r, t);
+    pb.cubic_to(rt - r + k, t, rt, t + r - k, rt, t + r);
+    pb.line_to(rt, b - r);
+    pb.cubic_to(rt, b - r + k, rt - r + k, b, rt - r, b);
+    pb.line_to(l + r, b);
+    pb.cubic_to(l + r - k, b, l, b - r + k, l, b - r);
+    pb.line_to(l, t + r);
+    pb.cubic_to(l, t + r - k, l + r - k, t, l + r, t);
+    pb.close();
+    pb.finish()
 }
 
 /// The panel in `style` at 1080p, filled with made-up messages: settings preview
@@ -163,7 +217,7 @@ pub fn sample_panel(style: &OverlayStyle) -> RgbaImage {
     let (w, h) = (style.width, style.height);
     let messages = sample_messages();
     let t = messages.last().map_or(0.0, |m| m.time) + 1.0;
-    let mut overlay = Overlay::new(style, messages, HashMap::new());
+    let mut overlay = Overlay::new(style, messages, Images::default());
     RgbaImage::from_raw(w, h, overlay.frame(t).to_vec()).expect("frame size")
 }
 
@@ -233,13 +287,61 @@ mod tests {
     #[test]
     fn still_feed_reuses_buffer() {
         let (messages, images) = sample();
-        let mut overlay = Overlay::new(OverlayStyle::default(), messages, images);
+        let mut overlay = Overlay::new(OverlayStyle::default(), messages, images.into());
         let a = overlay.frame(10.0);
         let b = overlay.frame(10.5);
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(a.len(), 440 * 520 * 4);
         let c = overlay.frame(2.1);
         assert!(!Arc::ptr_eq(&a, &c), "message 3 still sliding in");
+    }
+
+    /// A green-then-blue emote, half a second each, alone in the feed.
+    fn animated_overlay(style: OverlayStyle) -> Overlay {
+        use image::{Delay, Frame, Rgba};
+        let frame = |c: [u8; 4]| Frame::from_parts(RgbaImage::from_pixel(8, 8, Rgba(c)), 0, 0, Delay::from_numer_denom_ms(500, 1));
+        let bytes = {
+            let mut out = Vec::new();
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut out);
+            enc.encode_frames([frame([0, 255, 0, 255]), frame([0, 0, 255, 255])]).unwrap();
+            drop(enc);
+            out
+        };
+        let decoded = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let frames = image::AnimationDecoder::into_frames(decoded).collect_frames().unwrap();
+        let animation = crate::images::Animation::new(frames);
+        let images = Images {
+            stills: HashMap::from([("anim".to_owned(), animation.frames[0].clone())]),
+            animations: HashMap::from([("anim".to_owned(), animation)]),
+        };
+        let messages = vec![msg(0.0, "a", [255; 3], vec![Part::Emote { name: "x".into(), url: "anim".into() }])];
+        Overlay::new(style, messages, images)
+    }
+
+    #[test]
+    fn animated_emotes_move() {
+        let mut overlay = animated_overlay(OverlayStyle::default());
+        let count = |buf: &[u8], pick: fn(&[u8]) -> bool| buf.chunks_exact(4).filter(|p| pick(p)).count();
+        let green = |p: &[u8]| p[1] > 200 && p[2] < 50;
+        let blue = |p: &[u8]| p[2] > 200 && p[1] < 50;
+        let a = overlay.frame(10.2);
+        let b = overlay.frame(10.7);
+        assert!(!Arc::ptr_eq(&a, &b), "still feed, but the emote moves");
+        assert!(count(&a, green) > 100 && count(&a, blue) == 0);
+        assert!(count(&b, blue) > 100 && count(&b, green) == 0);
+    }
+
+    #[test]
+    fn message_plates() {
+        let style = OverlayStyle { message_background: 1.0, ..OverlayStyle::default() };
+        let (w, h) = (style.width, style.height);
+        let mut overlay = animated_overlay(style);
+        let frame = RgbaImage::from_raw(w, h, overlay.frame(10.0).to_vec()).unwrap();
+        // Bottom-left: on the plate (opaque black); right edge: past the short message.
+        let on = frame.get_pixel(14, h - 20);
+        let off = frame.get_pixel(w - 3, h - 20);
+        assert_eq!(on.0, [0, 0, 0, 255], "plate under the message");
+        assert_eq!(off.0[3], 0, "plate ends with the text");
     }
 
     #[test]
@@ -257,7 +359,7 @@ mod tests {
         let (mut messages, images) = sample();
         messages.retain(|m| m.name != "Кириллица");
         messages.push(msg(3.0, "dave", [0x1E, 0x90, 0xFF], vec![Part::Text("emoji 😀🎉 ok".into())]));
-        let mut overlay = Overlay::new(OverlayStyle::default(), messages, images);
+        let mut overlay = Overlay::new(OverlayStyle::default(), messages, images.into());
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/snapshots");
         let update = std::env::var_os("WCLIP_UPDATE_SNAPSHOTS").is_some();
         for t in [0.1, 3.1, 10.0] {
@@ -289,7 +391,7 @@ mod tests {
             .map(|i| ChatMessage { time: f64::from(i / 3), ..sample[i as usize % sample.len()].clone() })
             .collect();
         let started = std::time::Instant::now();
-        let mut overlay = Overlay::new(OverlayStyle::default(), messages, images);
+        let mut overlay = Overlay::new(OverlayStyle::default(), messages, images.into());
         println!("setup {:?}", started.elapsed());
         let started = std::time::Instant::now();
         let frames = 60 * FPS;
@@ -308,9 +410,15 @@ mod tests {
         let (messages, images) = sample();
         let style = OverlayStyle { background: 0.35, ..OverlayStyle::default() };
         let (w, h) = (style.width, style.height);
-        let mut overlay = Overlay::new(style, messages, images);
+        let mut overlay = Overlay::new(style, messages, images.into());
         let rgba = overlay.frame(10.0);
         let img = RgbaImage::from_raw(w, h, rgba.to_vec()).unwrap();
         img.save(concat!(env!("CARGO_MANIFEST_DIR"), "/target/overlay-sample.png")).unwrap();
+
+        let (messages, images) = sample();
+        let style = OverlayStyle { message_background: 0.6, ..OverlayStyle::default() };
+        let mut overlay = Overlay::new(style, messages, images.into());
+        let img = RgbaImage::from_raw(w, h, overlay.frame(10.0).to_vec()).unwrap();
+        img.save(concat!(env!("CARGO_MANIFEST_DIR"), "/target/overlay-plates.png")).unwrap();
     }
 }

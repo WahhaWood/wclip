@@ -3,7 +3,7 @@
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { getVersion } from "@tauri-apps/api/app";
   import { onMount } from "svelte";
-  import { api, type Preset, type Settings } from "$lib/api";
+  import { api, type ChatOutput, type Encoder, type Preset, type Quality, type Settings } from "$lib/api";
   import { explain } from "$lib/errors";
   import { app, showUpdate } from "$lib/state.svelte";
   import { parseTime } from "$lib/time";
@@ -18,6 +18,35 @@
   let panel = $state<string | null>(null);
   let panelError = $state<string | null>(null);
   let presetName = $state("");
+
+  const GPUS: Encoder[] = ["nvenc", "qsv", "amf", "vaapi"];
+  const ENCODERS: Record<Encoder, string> = {
+    auto: "Авто",
+    cpu: "Процессор",
+    nvenc: "NVIDIA NVENC",
+    qsv: "Intel Quick Sync",
+    amf: "AMD AMF",
+    vaapi: "VAAPI (Linux)",
+  };
+  const QUALITIES: [Quality, string][] = [
+    ["high", "Высокое"],
+    ["medium", "Среднее"],
+    ["small", "Компактное"],
+  ];
+  const CHAT_OUTPUTS: [ChatOutput, string][] = [
+    ["burn", "В кадре"],
+    ["file", "Отдельным файлом"],
+    ["both", "И то и другое"],
+  ];
+  /** Working GPU encoders for the chosen codec; `null` while trying them. */
+  let gpus = $state<Encoder[] | null>(null);
+  $effect(() => {
+    const codec = s.output.codec;
+    gpus = null;
+    api.encoders(codec).then((list) => {
+      if (s.output.codec === codec) gpus = list;
+    }, console.error);
+  });
 
   /** Overlay sizes are pixels at this video height; the width follows the frame. */
   const H = 1080;
@@ -109,6 +138,7 @@
       font: o.font,
       fontSize: o.fontSize,
       background: o.background,
+      messageBackground: o.messageBackground,
       lifetime: o.lifetime,
     };
     clearTimeout(timer);
@@ -339,6 +369,13 @@
         </label>
         <label class="control">
           <span>
+            Подложка сообщений
+            <b>{s.overlay.messageBackground > 0 ? `${Math.round(s.overlay.messageBackground * 100)}%` : "нет"}</b>
+          </span>
+          <input type="range" min="0" max="1" step="0.05" bind:value={s.overlay.messageBackground} />
+        </label>
+        <label class="control">
+          <span>
             Время жизни сообщения
             <b>{s.overlay.lifetime > 0 ? `${s.overlay.lifetime} с` : "не исчезают"}</b>
           </span>
@@ -381,6 +418,87 @@
     <p class="dim hint">
       Всё сохраняется само. Правки оверлея попадают в выбранный пресет, и нарезка сразу идёт с ним.
     </p>
+  </section>
+
+  <section class="glass card">
+    <h2>Фильтр чата</h2>
+    <div class="general">
+      <span>Боты</span>
+      <div>
+        <label class="check">
+          <input type="checkbox" bind:checked={s.chatFilter.hideBots} />
+          Скрывать сообщения ботов
+        </label>
+        <textarea
+          class="field bots"
+          rows="3"
+          disabled={!s.chatFilter.hideBots}
+          value={s.chatFilter.bots.join(", ")}
+          onchange={(e) =>
+            (s.chatFilter.bots = e.currentTarget.value
+              .split(/[,\n]/)
+              .map((b) => b.trim())
+              .filter(Boolean))}
+        ></textarea>
+        <p class="dim hint">Ники через запятую, регистр не важен.</p>
+      </div>
+      <span>Команды</span>
+      <label class="check">
+        <input type="checkbox" bind:checked={s.chatFilter.hideCommands} />
+        Скрывать команды (сообщения, начинающиеся с «!»)
+      </label>
+    </div>
+  </section>
+
+  <section class="glass card">
+    <h2>Видео</h2>
+    <div class="general">
+      <span>Кодировщик</span>
+      <div>
+        <select class="field" bind:value={s.output.encoder}>
+          <option value="auto">Авто{gpus ? ` · ${gpus.length ? ENCODERS[gpus[0]] : "процессор"}` : ""}</option>
+          <option value="cpu">Процессор (x264 / x265)</option>
+          {#each GPUS as e (e)}
+            <option value={e} disabled={!!gpus && !gpus.includes(e)}>
+              {ENCODERS[e]}{gpus && !gpus.includes(e) ? " · нет" : ""}
+            </option>
+          {/each}
+        </select>
+        <p class="dim hint">
+          Видеокарта кодирует в несколько раз быстрее процессора. Если она даст сбой, клип перекодируется на процессоре.
+        </p>
+      </div>
+      <span>Кодек</span>
+      <div class="line">
+        <button class="btn" class:selected={s.output.codec === "h264"} onclick={() => (s.output.codec = "h264")}>
+          H.264
+        </button>
+        <button class="btn" class:selected={s.output.codec === "hevc"} onclick={() => (s.output.codec = "hevc")}>
+          H.265
+        </button>
+        <span class="dim hint inline">H.265 меньше по размеру, H.264 открывается везде.</span>
+      </div>
+      <span>Качество</span>
+      <div class="line">
+        {#each QUALITIES as [q, label] (q)}
+          <button class="btn" class:selected={s.output.quality === q} onclick={() => (s.output.quality = q)}>
+            {label}
+          </button>
+        {/each}
+      </div>
+      <span>Чат</span>
+      <div>
+        <div class="line">
+          {#each CHAT_OUTPUTS as [o, label] (o)}
+            <button class="btn" class:selected={s.chatOutput === o} onclick={() => (s.chatOutput = o)}>{label}</button>
+          {/each}
+        </div>
+        <p class="dim hint">
+          Отдельный файл — видео одного чата с прозрачным фоном (ProRes 4444, <code>.chat.mov</code> рядом с клипом),
+          чтобы двигать его при монтаже.
+        </p>
+      </div>
+    </div>
   </section>
 
   <section class="glass card">
@@ -544,6 +662,26 @@
   .line {
     display: flex;
     gap: 10px;
+    align-items: center;
+  }
+
+  .hint.inline {
+    margin: 0;
+  }
+
+  .check {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding-top: 9px;
+    cursor: pointer;
+  }
+
+  .bots {
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 10px;
+    resize: vertical;
   }
 
   .general {

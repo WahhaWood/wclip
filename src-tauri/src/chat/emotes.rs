@@ -76,15 +76,14 @@ struct SevenTvHost {
 
 #[derive(Deserialize)]
 struct SevenTvFile {
+    /// Animated for an animated emote; `static_name` would be its first frame.
     name: String,
-    /// First frame of an animated emote; same as `name` for static ones.
-    static_name: String,
 }
 
 fn seven_tv(set: SevenTvSet) -> impl Iterator<Item = (String, String)> {
     set.emotes.into_iter().filter_map(|e| {
         let file = e.data.host.files.iter().find(|f| f.name == "2x.webp")?;
-        Some((e.name, format!("https:{}/{}", e.data.host.url, file.static_name)))
+        Some((e.name, format!("https:{}/{}", e.data.host.url, file.name)))
     })
 }
 
@@ -129,11 +128,11 @@ mod tests {
     }
 
     #[test]
-    fn seven_tv_uses_static_2x() {
+    fn seven_tv_uses_animated_2x() {
         let user: SevenTvUser = parse(include_str!("../../fixtures/7tv_user.json"));
         let map: Emotes = seven_tv(user.emote_set.unwrap()).collect();
         assert_eq!(map["OMEGALUL"], "https://cdn.7tv.app/emote/e1/2x.webp");
-        assert_eq!(map["catJAM"], "https://cdn.7tv.app/emote/e2/2x_static.webp");
+        assert_eq!(map["catJAM"], "https://cdn.7tv.app/emote/e2/2x.webp");
     }
 
     #[test]

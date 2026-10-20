@@ -1,21 +1,24 @@
 pub mod chat;
 pub mod cut;
+pub mod encode;
 pub mod errlog;
 pub mod failure;
 pub mod images;
 pub mod job;
+pub mod moments;
 pub mod overlay;
 pub mod settings;
 pub mod tools;
 pub mod twitch;
 pub mod updater;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use failure::{Failure, Kind};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::async_runtime::JoinHandle;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -31,8 +34,14 @@ struct AppState {
     tools: Mutex<Option<tools::Tools>>,
     /// The running job; aborting it kills ffmpeg (see `cut::cut`).
     job: Mutex<Option<JoinHandle<()>>>,
-    /// Last preview frame: (playlist, VOD time, JPEG).
-    preview_frame: Mutex<Option<(String, f64, Arc<Vec<u8>>)>>,
+    /// Recent preview frames: (playlist, VOD time, JPEG), newest last.
+    preview_frames: Mutex<Vec<(String, f64, Arc<Vec<u8>>)>>,
+    /// Chat of the whole video open on the home screen.
+    chat: Mutex<Option<LoadedChat>>,
+    /// The `chat_load` in progress; a new one aborts it.
+    chat_task: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Working GPU encoders by codec, tried once per run (see `gpu_encoders`).
+    gpus: tokio::sync::Mutex<HashMap<encode::Codec, Vec<encode::Encoder>>>,
     /// Release found by the last update check.
     update: Mutex<Option<updater::Release>>,
     /// Updated copy to start on restart.
@@ -52,6 +61,46 @@ enum ClipEvent {
     Done { index: usize, path: PathBuf, no_chat: bool },
     Failed { index: usize, error: Failure },
 }
+
+/// Payload of `merge` events, after the clips when the job joins them.
+#[derive(Clone, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+enum MergeEvent {
+    Running,
+    Done { path: PathBuf },
+    Failed { error: Failure },
+}
+
+/// How `job_start` encodes and what chat it shows; the frontend passes the settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct JobOptions {
+    output: encode::Output,
+    chat_output: cut::ChatOutput,
+    /// Also join the clips into one video.
+    merge: bool,
+    filter: chat::ChatFilter,
+}
+
+/// Chat of a whole video: for finding moments, and cut from without loading again.
+struct LoadedChat {
+    /// `chat_key` of the video and log it was loaded for.
+    key: String,
+    duration: f64,
+    messages: Arc<Vec<chat::ChatMessage>>,
+}
+
+/// Identifies the chat of a VOD, or of a local video's log at a given sync.
+fn chat_key(vod: &job::Vod, log: Option<&job::ChatLogRef>) -> Option<String> {
+    match (vod.local, log) {
+        (false, _) => Some(format!("vod:{}", vod.id)),
+        (true, Some(log)) => Some(format!("log:{}@{}", log.path.display(), log.start)),
+        (true, None) => None,
+    }
+}
+
+/// Preview frames kept: two per interval while adjusting a few of them.
+const PREVIEW_FRAMES: usize = 24;
 
 /// Pauses before cutting a clip again after a network failure; one retry each.
 const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(15)];
@@ -94,6 +143,24 @@ fn updater_client() -> Result<reqwest::Client, Failure> {
 
 fn ready_tools(state: &AppState) -> Result<tools::Tools, String> {
     state.tools.lock().unwrap().clone().ok_or_else(|| "tools are not installed".to_owned())
+}
+
+/// Working GPU encoders for `codec`, tried on first use only (about a second).
+async fn gpu_encoders(state: &AppState, tools: &tools::Tools, codec: encode::Codec) -> Vec<encode::Encoder> {
+    let mut gpus = state.gpus.lock().await;
+    if let Some(list) = gpus.get(&codec) {
+        return list.clone();
+    }
+    let list = encode::available(tools, codec).await;
+    gpus.insert(codec, list.clone());
+    list
+}
+
+/// GPU encoders that work here for `codec`, for the settings screen.
+#[tauri::command]
+async fn encoders(state: State<'_, AppState>, codec: encode::Codec) -> Result<Vec<encode::Encoder>, String> {
+    let tools = ready_tools(&state)?;
+    Ok(gpu_encoders(&state, &tools, codec).await)
 }
 
 #[tauri::command]
@@ -161,20 +228,77 @@ async fn font_families() -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// JPEG of the VOD frame at `time`, 960 px wide, behind the overlay preview.
-/// Fetched once per (playlist, time).
+/// JPEG of the VOD frame at `time`, 960 px wide: behind the overlay preview and for
+/// adjusting intervals. The last `PREVIEW_FRAMES` are kept.
 #[tauri::command]
 async fn preview_frame(state: State<'_, AppState>, playlist: String, time: f64) -> Result<Response, Failure> {
-    if let Some((p, t, jpeg)) = state.preview_frame.lock().unwrap().as_ref()
-        && *p == playlist
-        && *t == time
-    {
+    if let Some((_, _, jpeg)) = state.preview_frames.lock().unwrap().iter().find(|(p, t, _)| *p == playlist && *t == time) {
         return Ok(Response::new(jpeg.to_vec()));
     }
     let tools = ready_tools(&state)?;
     let jpeg = cut::grab_frame(&tools, &playlist, time).await.map_err(|e| log("preview", Failure::new(e.kind(), e)))?;
-    *state.preview_frame.lock().unwrap() = Some((playlist, time, Arc::new(jpeg.clone())));
+    let mut frames = state.preview_frames.lock().unwrap();
+    if frames.len() == PREVIEW_FRAMES {
+        frames.remove(0);
+    }
+    frames.push((playlist, time, Arc::new(jpeg.clone())));
     Ok(Response::new(jpeg))
+}
+
+/// Loads the chat of the whole video, reporting `chat-progress` events (0..=1),
+/// and keeps it for `chat_activity` and the clips; returns the message count. A
+/// local video needs its `chat_log`. A newer call cancels this one, which then
+/// fails with "cancelled".
+#[tauri::command]
+async fn chat_load(app: AppHandle, state: State<'_, AppState>, vod: job::Vod, chat_log: Option<job::ChatLogRef>) -> Result<usize, Failure> {
+    let key = chat_key(&vod, chat_log.as_ref()).ok_or("no chat log")?;
+    if let Some(loaded) = state.chat.lock().unwrap().as_ref().filter(|c| c.key == key) {
+        return Ok(loaded.messages.len());
+    }
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let task_app = app.clone();
+    let task = tauri::async_runtime::spawn(async move {
+        match chat_log {
+            Some(log_ref) if vod.local => {
+                let path = log_ref.path.clone();
+                let chat_log = tauri::async_runtime::spawn_blocking(move || chat::log::open(&path))
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| Failure::new(Kind::Chat, e))?;
+                Ok(chat::from_log(&client, &chat_log, log_ref.start).await)
+            }
+            _ => {
+                let progress = |fraction: f64| {
+                    let _ = task_app.emit("chat-progress", fraction);
+                };
+                chat::load(&client, &vod.id, 0.0, vod.duration, progress).await.map_err(|e| Failure::new(Kind::Chat, e))
+            }
+        }
+    });
+    if let Some(previous) = state.chat_task.lock().unwrap().replace(task.inner().abort_handle()) {
+        previous.abort();
+    }
+    let messages = match task.await {
+        Ok(result) => result.map_err(|e| log("chat load", e))?,
+        Err(_) => return Err("cancelled".into()),
+    };
+    let count = messages.len();
+    *state.chat.lock().unwrap() = Some(LoadedChat { key, duration: vod.duration, messages: Arc::new(messages) });
+    Ok(count)
+}
+
+/// Activity of the loaded chat, messages matching `query` only (see
+/// `moments::parse_query`).
+#[tauri::command]
+async fn chat_activity(state: State<'_, AppState>, query: String) -> Result<moments::Activity, String> {
+    let (messages, duration) = {
+        let chat = state.chat.lock().unwrap();
+        let chat = chat.as_ref().ok_or("chat is not loaded")?;
+        (chat.messages.clone(), chat.duration)
+    };
+    tauri::async_runtime::spawn_blocking(move || moments::activity(&messages, duration, &query))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// PNG of the chat panel in `style` at 1080p with made-up messages; the settings
@@ -191,10 +315,10 @@ async fn overlay_panel(style: overlay::OverlayStyle) -> Result<Response, String>
     Ok(Response::new(png))
 }
 
-/// Starts cutting every interval in order, reporting `clip` events and `job-done`
-/// at the end. No `overlay` style means clips without chat; a local video without
-/// `chat_log` is cut without chat too. `out_dir` defaults to
-/// `<Videos>/WClip`, `name_template` to `job::DEFAULT_TEMPLATE`.
+/// Starts cutting every interval in order, reporting `clip` events, `merge` events
+/// when joining them and `job-done` at the end. No `overlay` style means clips
+/// without chat; a local video without `chat_log` is cut without chat too.
+/// `out_dir` defaults to `<Videos>/WClip`, `name_template` to `job::DEFAULT_TEMPLATE`.
 #[tauri::command]
 fn job_start(
     app: AppHandle,
@@ -203,7 +327,9 @@ fn job_start(
     overlay: Option<overlay::OverlayStyle>,
     out_dir: Option<PathBuf>,
     name_template: Option<String>,
+    options: Option<JobOptions>,
 ) -> Result<(), Failure> {
+    let options = options.unwrap_or_default();
     if let Some((i, e)) = job.check().into_iter().next() {
         return Err(format!("interval {}: {e}", i + 1).into());
     }
@@ -218,6 +344,10 @@ fn job_start(
     // Without a timeout a request on a dropped connection can hang forever.
     let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
 
+    // Chat already loaded for finding moments saves loading it per clip.
+    let key = chat_key(&job.vod, job.chat_log.as_ref());
+    let loaded = state.chat.lock().unwrap().as_ref().filter(|c| Some(&c.key) == key.as_ref()).map(|c| c.messages.clone());
+
     let mut running = state.job.lock().unwrap();
     if running.as_ref().is_some_and(|h| !h.inner().is_finished()) {
         return Err("a job is already running".into());
@@ -227,24 +357,34 @@ fn job_start(
         let app = task_app;
         let cache = images::ImageCache::new(cache_dir, client.clone());
         // A local video's chat is read once for all its clips.
-        let log_messages = match (&job.chat_log, &overlay) {
-            (Some(log_ref), Some(_)) if job.vod.local => {
+        let all_messages = match (loaded, &job.chat_log, &overlay) {
+            (_, _, None) => None,
+            (Some(all), _, _) => Some(Ok(all)),
+            (None, Some(log_ref), _) if job.vod.local => {
                 let path = log_ref.path.clone();
                 let opened = tauri::async_runtime::spawn_blocking(move || chat::log::open(&path)).await;
                 Some(match opened {
-                    Ok(Ok(chat_log)) => Ok(chat::from_log(&client, &chat_log, log_ref.start).await),
+                    Ok(Ok(chat_log)) => Ok(Arc::new(chat::from_log(&client, &chat_log, log_ref.start).await)),
                     Ok(Err(e)) => Err(e.to_string()),
                     Err(e) => Err(e.to_string()),
                 })
             }
             _ => None,
         };
-        let overlay = overlay.filter(|_| !job.vod.local || log_messages.is_some());
+        let overlay = overlay.filter(|_| !job.vod.local || all_messages.is_some());
+        let mut video = match options.output.encoder {
+            encode::Encoder::Auto => {
+                let gpus = gpu_encoders(&app.state::<AppState>(), &tools, options.output.codec).await;
+                encode::resolve(options.output, &gpus)
+            }
+            _ => options.output,
+        };
+        let mut done = Vec::new();
         for (index, interval) in job.intervals.iter().enumerate() {
             let _ = app.emit("clip", ClipEvent::Preparing { index });
             let chat = match &overlay {
-                Some(style) => match &log_messages {
-                    Some(Ok(all)) => Ok(Some(cut::log_chat(&cache, &job.vod, interval, style, all).await)),
+                Some(style) => match &all_messages {
+                    Some(Ok(all)) => Ok(Some(cut::chat_from(&cache, &job.vod, interval, style, all).await)),
                     Some(Err(e)) => Err(e.clone()),
                     None => cut::load_chat(&client, &cache, &job.vod, interval, style).await.map(Some).map_err(|e| e.to_string()),
                 },
@@ -257,6 +397,10 @@ fn job_start(
                     continue;
                 }
             };
+            let chat = chat.map(|mut c| {
+                c.messages.retain(|m| options.filter.keeps(m));
+                c
+            });
             // An empty panel would only cover the video.
             let no_chat = chat.as_ref().is_some_and(|c| c.messages.is_empty());
             let chat = chat.filter(|c| !c.messages.is_empty());
@@ -266,13 +410,23 @@ fn job_start(
             };
             let mut attempt = 0;
             let event = loop {
-                match cut::cut(&tools, &job.vod.playlist, interval, chat.clone(), &out, progress).await {
-                    Ok(()) => break ClipEvent::Done { index, path: out, no_chat },
+                let cut_options = cut::CutOptions { video, chat: options.chat_output };
+                match cut::cut(&tools, &job.vod.playlist, interval, chat.clone(), cut_options, &out, progress).await {
+                    Ok(()) => {
+                        done.push((out.clone(), interval.clone()));
+                        break ClipEvent::Done { index, path: out, no_chat };
+                    }
                     Err(e) if e.kind() == Kind::Network && attempt < RETRY_DELAYS.len() => {
                         errlog::write(&format!("clip {} retry {}", index + 1, attempt + 1), &e.to_string());
                         let _ = app.emit("clip", ClipEvent::Retrying { index, attempt: attempt + 1 });
                         tokio::time::sleep(RETRY_DELAYS[attempt]).await;
                         attempt += 1;
+                    }
+                    // A GPU encoder can fail on a driver or a frame format; the CPU
+                    // always works, so the rest of the job goes there too.
+                    Err(e) if video.encoder != encode::Encoder::Cpu && e.kind() != Kind::DiskFull => {
+                        errlog::write(&format!("clip {} on {:?}, now on the CPU", index + 1, video.encoder), &e.to_string());
+                        video = video.on_cpu();
                     }
                     Err(e) => {
                         let error = log(&format!("clip {}", index + 1), Failure::new(e.kind(), e));
@@ -281,6 +435,16 @@ fn job_start(
                 }
             };
             let _ = app.emit("clip", event);
+        }
+        if options.merge && done.len() >= 2 {
+            let _ = app.emit("merge", MergeEvent::Running);
+            let (clips, intervals): (Vec<PathBuf>, Vec<job::Interval>) = done.into_iter().unzip();
+            let out = job::merged_path(&out_dir, &template, &job.vod, &intervals);
+            let event = match cut::concat(&tools, &clips, &out).await {
+                Ok(()) => MergeEvent::Done { path: out },
+                Err(e) => MergeEvent::Failed { error: log("merge", Failure::new(e.kind(), e)) },
+            };
+            let _ = app.emit("merge", event);
         }
         let _ = app.emit("job-done", ());
     }));
@@ -372,6 +536,9 @@ pub fn run() {
             vod_info,
             local_video,
             chat_log_open,
+            chat_load,
+            chat_activity,
+            encoders,
             settings_load,
             settings_save,
             font_families,
