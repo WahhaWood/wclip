@@ -102,7 +102,7 @@
             {#each corners as [corner, arrow] (corner)}
               <button
                 class="btn small"
-                class:primary={s.overlay.corner === corner}
+                class:selected={s.overlay.corner === corner}
                 onclick={() => (s.overlay.corner = corner)}>{arrow}</button
               >
             {/each}
@@ -216,7 +216,7 @@
     width: 100%;
     aspect-ratio: 16 / 9;
     border-radius: 12px;
-    border: 1px solid var(--glass-border);
+    border: 1px solid var(--outline);
   }
 
   .preview img.stale {
@@ -253,7 +253,7 @@
 
   input[type="range"] {
     width: 100%;
-    accent-color: var(--seed);
+    accent-color: var(--primary);
   }
 
   .hint {

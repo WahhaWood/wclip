@@ -48,7 +48,7 @@
       <span class="brand">WClip</span>
       <nav>
         {#each tabs as [screen, label] (screen)}
-          <button class="btn small" class:primary={app.screen === screen} onclick={() => (app.screen = screen)}>
+          <button class="btn small" class:selected={app.screen === screen} onclick={() => (app.screen = screen)}>
             {label}
           </button>
         {/each}

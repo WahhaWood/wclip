@@ -10,19 +10,21 @@
   src: url("/fonts/Inter-Bold.ttf") format("truetype");
 }
 
-/* Theme tokens (WTube look). Screens use only these variables. */
+/* Theme tokens: WTube's Material 3 dark scheme (TonalSpot from seed #8ECAE6). Screens use only these variables. */
 :root {
-  --seed: #8ecae6;
-  --bg-top: #2a1766;
-  --bg-bottom: #081a38;
-  --glow-cyan: #3fd0ff;
-  --glow-violet: #c05cff;
-  --text: #eef4ff;
-  --text-dim: rgba(238, 244, 255, 0.64);
-  --danger: #ff8a9a;
-  --field-bg: rgba(0, 0, 0, 0.18);
-  --glass: rgba(255, 255, 255, 0.07);
-  --glass-border: rgba(255, 255, 255, 0.14);
+  --bg: #0f1417;
+  --surface: #1b2023;
+  --surface-high: #262b2d;
+  --surface-highest: #303538;
+  --outline: #40484c;
+  --primary: #8bd0ef;
+  --on-primary: #003546;
+  --tonal: #354a53;
+  --tertiary: #c6c2ea;
+  --text: #dfe3e7;
+  --text-dim: #c0c8cd;
+  --danger: #ffb4ab;
+  --glass: color-mix(in srgb, var(--surface) 82%, transparent);
   --radius: 20px;
   --font: Inter, "Segoe UI", system-ui, sans-serif;
   color-scheme: dark;
@@ -41,17 +43,13 @@ body {
 body {
   font-family: var(--font);
   color: var(--text);
-  background:
-    radial-gradient(circle at 15% 10%, color-mix(in srgb, var(--glow-cyan) 22%, transparent), transparent 45%),
-    radial-gradient(circle at 85% 90%, color-mix(in srgb, var(--glow-violet) 22%, transparent), transparent 45%),
-    linear-gradient(160deg, var(--bg-top), var(--bg-bottom));
-  background-attachment: fixed;
+  background: var(--bg);
   -webkit-font-smoothing: antialiased;
 }
 
 .glass {
   background: var(--glass);
-  border: 1px solid var(--glass-border);
+  border: 1px solid color-mix(in srgb, var(--outline) 60%, transparent);
   border-radius: var(--radius);
   backdrop-filter: blur(24px) saturate(140%);
 }
@@ -63,9 +61,9 @@ body {
 
 .btn {
   padding: 9px 18px;
-  border: 1px solid var(--glass-border);
+  border: none;
   border-radius: 999px;
-  background: var(--glass);
+  background: var(--surface-high);
   color: var(--text);
   font: inherit;
   font-weight: 600;
@@ -74,16 +72,22 @@ body {
 }
 
 .btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--seed) 14%, transparent);
+  background: var(--surface-highest);
+}
+
+/* Selected toggle (tab, corner): M3 navigation indicator. */
+.btn.selected,
+.btn.selected:hover:not(:disabled) {
+  background: var(--tonal);
 }
 
 .btn.primary {
-  background: color-mix(in srgb, var(--seed) 28%, transparent);
-  border-color: color-mix(in srgb, var(--seed) 50%, transparent);
+  background: var(--primary);
+  color: var(--on-primary);
 }
 
 .btn.primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--seed) 40%, transparent);
+  background: color-mix(in srgb, var(--primary) 88%, var(--text));
 }
 
 .btn:disabled {
@@ -99,16 +103,16 @@ body {
 .field {
   width: 100%;
   padding: 9px 12px;
-  border: 1px solid var(--glass-border);
+  border: 1px solid var(--outline);
   border-radius: 12px;
-  background: var(--field-bg);
+  background: var(--surface-high);
   color: var(--text);
   font: inherit;
   outline: none;
 }
 
 .field:focus {
-  border-color: color-mix(in srgb, var(--seed) 70%, transparent);
+  border-color: var(--primary);
 }
 
 .field.invalid {
@@ -116,7 +120,7 @@ body {
 }
 
 select.field option {
-  background: var(--bg-bottom);
+  background: var(--surface-high);
 }
 
 .dim {
@@ -130,18 +134,18 @@ select.field option {
 .bar {
   height: 6px;
   border-radius: 3px;
-  background: var(--glass);
+  background: var(--surface-highest);
   overflow: hidden;
 }
 
 .bar > div {
   height: 100%;
-  background: linear-gradient(90deg, var(--glow-cyan), var(--glow-violet));
+  background: var(--primary);
   transition: width 0.2s;
 }
 
 .bar.done > div {
-  background: var(--seed);
+  background: var(--tertiary);
 }
 
 .bar.failed > div {
