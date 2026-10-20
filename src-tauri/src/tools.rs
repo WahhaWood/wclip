@@ -214,19 +214,31 @@ async fn download(
     let name = url.rsplit('/').next().unwrap_or(url);
     let sums = client.get(sums_url).send().await?.error_for_status()?.text().await?;
     let expected = crate::updater::checksum(&sums, name).ok_or_else(|| Error::Checksum(name.to_owned()))?;
+    download_checked(client, url, expected, target, &|done, total| on_progress(Progress { tool, done, total })).await
+}
 
+/// Downloads `url` to `target` through a `.part` file and keeps it only if its
+/// SHA-256 is `expected` (hex). `on_bytes` gets the bytes done and the total.
+pub(crate) async fn download_checked(
+    client: &reqwest::Client,
+    url: &str,
+    expected: &str,
+    target: &Path,
+    on_bytes: &(dyn Fn(u64, Option<u64>) + Sync),
+) -> Result<()> {
+    let name = url.rsplit('/').next().unwrap_or(url);
     let mut resp = client.get(url).send().await?.error_for_status()?;
     let total = resp.content_length();
     let part = target.with_extension("part");
     let mut file = std::fs::File::create(&part)?;
     let mut hasher = Sha256::new();
     let mut done = 0u64;
-    on_progress(Progress { tool, done, total });
+    on_bytes(done, total);
     while let Some(chunk) = resp.chunk().await? {
         file.write_all(&chunk)?;
         hasher.update(&chunk);
         done += chunk.len() as u64;
-        on_progress(Progress { tool, done, total });
+        on_bytes(done, total);
     }
     file.flush()?;
     drop(file);

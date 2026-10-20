@@ -221,6 +221,24 @@ pub fn clip_style(style: &OverlayStyle, vod: &Vod, layout: Option<&Layout>) -> O
     }
 }
 
+/// `length` seconds of audio from `start` as 16 kHz mono f32 samples, what whisper
+/// takes.
+pub async fn audio(tools: &Tools, input: &str, start: f64, length: f64) -> Result<Vec<f32>> {
+    let out = tokio_command(&tools.ffmpeg)
+        .args(["-hide_banner", "-nostdin", "-loglevel", "error"])
+        .args(input_args(input))
+        .args(["-ss", &start.to_string(), "-i", input, "-t", &length.to_string()])
+        .args(["-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "f32le", "pipe:1"])
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Err(tool_error(&out.stderr, "ffmpeg"));
+    }
+    Ok(out.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect())
+}
+
 /// Loads the chat shown during `interval` (with lookback, so the panel starts
 /// filled) and every badge and emote image in it. Images that fail to load are
 /// left out; the renderer falls back to text for them. `style` is from `clip_style`.
@@ -281,6 +299,19 @@ pub struct CutOptions {
     pub chat: ChatOutput,
     /// A vertical clip laid out so; the chat style is then in canvas pixels.
     pub layout: Option<Layout>,
+    /// Subtitles to burn in: an ASS file with a `fonts` directory next to it. Its
+    /// name must need no escaping in a filter graph (see `subtitles_filter`).
+    pub subtitles: Option<PathBuf>,
+}
+
+/// The `ass` filter for `file`; ffmpeg runs in its directory, so the graph holds no
+/// path that would need escaping (Windows drive colons and backslashes).
+fn subtitles_filter(cmd: &mut tokio::process::Command, file: &Path) -> String {
+    if let Some(dir) = file.parent() {
+        cmd.current_dir(dir);
+    }
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    format!("ass=filename={name}:fontsdir=fonts,")
 }
 
 /// The chat of clip `out` as its own video: ProRes 4444 keeps the transparency and
@@ -312,6 +343,7 @@ pub async fn cut(
         .args(&video.global)
         .args(input_args(playlist))
         .args(["-ss", &interval.start.to_string(), "-i", playlist]);
+    let subs = options.subtitles.as_deref().map(|file| subtitles_filter(&mut cmd, file)).unwrap_or_default();
     let (layout, main) = match &options.layout {
         Some(layout) => (format!("{};", layout.graph("main")), "[main]"),
         None => (String::new(), "[0:v]"),
@@ -324,14 +356,14 @@ pub async fn cut(
                 .args(["-framerate", &overlay::FPS.to_string(), "-i", "pipe:0"])
                 .stdin(Stdio::piped());
             if burn {
-                format!("{layout}{main}[1:v]overlay=x={x}:y={y}:eof_action=repeat,{}[v]", video.filter)
+                format!("{layout}{main}[1:v]overlay=x={x}:y={y}:eof_action=repeat,{subs}{}[v]", video.filter)
             } else {
-                format!("{layout}{main}{}[v]", video.filter)
+                format!("{layout}{main}{subs}{}[v]", video.filter)
             }
         }
         None => {
             cmd.stdin(Stdio::null());
-            format!("{layout}{main}{}[v]", video.filter)
+            format!("{layout}{main}{subs}{}[v]", video.filter)
         }
     };
     cmd.args(["-filter_complex", &graph, "-map", "[v]", "-map", "0:a:0?", "-t", &length.to_string()])
@@ -747,7 +779,7 @@ mod tests {
         };
         let style = OverlayStyle::default().scaled(720);
         let chat = ChatOverlay { style: style.clone(), messages: vec![message], images: Images::default() };
-        let options = CutOptions { video, chat: ChatOutput::Both, layout: None };
+        let options = CutOptions { video, chat: ChatOutput::Both, ..CutOptions::default() };
         let playlist = source.to_string_lossy().into_owned();
         let (a, b) = (dir.join("a.mp4"), dir.join("b.mp4"));
         for (out, start) in [(&a, 0.5), (&b, 3.0)] {
@@ -822,6 +854,83 @@ mod tests {
         let p = px(900, 1800);
         assert!(p[2] > 120, "background {p:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// White captions in the middle of a blue frame, written to a directory whose
+    /// name a filter graph could not take as is; offline, ffmpeg from `PATH`:
+    /// `cargo test -- --ignored smoke_subtitles --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn smoke_subtitles() {
+        use crate::subtitles::{self, Caption, SubtitleStyle};
+        let dir = smoke_dir("subs");
+        let tools = Tools { ffmpeg: "ffmpeg".into(), ffprobe: "ffprobe".into(), yt_dlp: "yt-dlp".into() };
+        let source = dir.join("source.mp4");
+        let ok = tools::command(&tools.ffmpeg)
+            .args(["-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=1280x720:r=30:d=3"])
+            .args(["-f", "lavfi", "-i", "sine=d=3", "-c:v", "libx264", "-c:a", "aac", "-shortest"])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let captions = [Caption { start: 0.0, end: 3.0, text: "███ ███".into(), words: vec![0.0, 1.5] }];
+        let style = SubtitleStyle { size: 120.0, ..SubtitleStyle::default() };
+        let subs_dir = dir.join("odd: dir, [1]");
+        let file = subtitles::write(&subs_dir, "clip-1", &captions, &style, (1280, 720), 0.5).unwrap();
+        let options = CutOptions { subtitles: Some(file), ..CutOptions::default() };
+        let out = dir.join("subs.mp4");
+        let interval = Interval { start: 0.0, end: 3.0, name: String::new() };
+        cut(&tools, &source.to_string_lossy(), &interval, None, options, &out, |_| {}).await.unwrap();
+        // The first word is highlighted at first, the second later; both are drawn.
+        let early = frame_at(&tools, &out, 0.5);
+        let late = frame_at(&tools, &out, 2.0);
+        let (y, row) = (360, |img: &RgbaImage, x: u32| img.get_pixel(x, 360).0);
+        let lit = |p: [u8; 4]| p[0] > 200 && p[1] > 160 && p[2] < 90;
+        let white = |p: [u8; 4]| p[0] > 200 && p[1] > 200 && p[2] > 200;
+        let xs: Vec<u32> = (0..1280).step_by(4).collect();
+        let first = xs.iter().find(|&&x| !row(&early, x).starts_with(&[0, 0])).copied();
+        assert!(first.is_some(), "nothing drawn at y={y}");
+        assert!(xs.iter().any(|&x| lit(row(&early, x))) && xs.iter().any(|&x| white(row(&early, x))));
+        assert!(xs.iter().any(|&x| lit(row(&late, x))) && xs.iter().any(|&x| white(row(&late, x))));
+        let left_lit = |img: &RgbaImage| xs.iter().filter(|&&x| x < 640).any(|&x| lit(row(img, x)));
+        assert!(left_lit(&early) && !left_lit(&late));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 20 s of Russian speech transcribed and burnt into a vertical clip; keeps the
+    /// clip and a frame: `WCLIP_MODEL=<file> cargo test --release -- --ignored
+    /// smoke_vod_subtitles --nocapture`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn smoke_vod_subtitles() {
+        use crate::subtitles::{self, SubtitleStyle};
+        use std::sync::atomic::AtomicBool;
+        let model = PathBuf::from(std::env::var("WCLIP_MODEL").expect("WCLIP_MODEL"));
+        let dir = smoke_dir("vod-subs");
+        let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
+        let vod = vod_info(&tools, "2903333502", None).await.unwrap();
+        let interval = Interval { start: 3600.0, end: 3620.0, name: String::new() };
+        let samples = audio(&tools, &vod.playlist, interval.start, 20.0).await.unwrap();
+        let words = tokio::task::spawn_blocking(move || {
+            crate::speech::transcribe(&model, &samples, Some("ru"), |_| {}, Arc::new(AtomicBool::new(false)))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let style = SubtitleStyle::default();
+        let captions = subtitles::captions(&words, style.words);
+        for c in &captions {
+            println!("{:>5.2}-{:<5.2} {}", c.start, c.end, c.text);
+        }
+        let layout = Layout { subtitles_y: 0.5, ..Layout::default() };
+        let file = subtitles::write(&dir.join("subs"), "clip", &captions, &style, (1080, 1920), layout.subtitles_y).unwrap();
+        let options = CutOptions { layout: Some(layout), subtitles: Some(file), ..CutOptions::default() };
+        let out = dir.join("subs.mp4");
+        cut(&tools, &vod.playlist, &interval, None, options, &out, |_| {}).await.unwrap();
+        let t = captions[1].start + 0.1;
+        frame_at(&tools, &out, t).save(dir.join("frame.png")).unwrap();
+        println!("frame at {t:.2} in {}", dir.display());
     }
 
     /// 20 s of a real VOD laid out "camera on top, game below" with chat, on the CPU

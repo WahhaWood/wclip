@@ -50,6 +50,9 @@ pub struct Job {
     pub intervals: Vec<Interval>,
     #[serde(default)]
     pub chat_log: Option<ChatLogRef>,
+    /// Captions edited before cutting, by interval; the missing ones are transcribed.
+    #[serde(default)]
+    pub captions: Vec<Option<Vec<crate::subtitles::Caption>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, thiserror::Error)]
@@ -220,6 +223,7 @@ mod tests {
                 .map(|&(start, end)| Interval { start, end, name: String::new() })
                 .collect(),
             chat_log: None,
+            captions: Vec::new(),
         }
     }
 

@@ -14,6 +14,8 @@ pub enum Kind {
     DiskFull,
     /// The chat could not be loaded; the clip can still be cut without it.
     Chat,
+    /// Subtitles need the speech model, which is not downloaded yet.
+    NoModel,
     Other,
 }
 

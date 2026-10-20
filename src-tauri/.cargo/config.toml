@@ -1,0 +1,3 @@
+# whisper.cpp: no -march=native, so release builds run on any CPU with AVX2.
+[env]
+GGML_NATIVE = "OFF"

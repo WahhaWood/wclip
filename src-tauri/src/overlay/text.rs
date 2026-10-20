@@ -88,13 +88,16 @@ pub struct Block {
     pub content_width: f32,
 }
 
+/// Also given to libass for subtitles.
+pub const INTER_BOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-Bold.ttf");
+
 /// Scanning the system fonts takes a while, so it is done once and cloned.
 static FONT_DB: LazyLock<fontdb::Database> = LazyLock::new(|| {
     let mut db = fontdb::Database::new();
     // System fonts are the fallback for scripts Inter lacks (CJK and others).
     db.load_system_fonts();
     db.load_font_data(include_bytes!("../../assets/fonts/Inter-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../../assets/fonts/Inter-Bold.ttf").to_vec());
+    db.load_font_data(INTER_BOLD.to_vec());
     db.load_font_data(include_bytes!("../../assets/fonts/Twemoji.Mozilla.ttf").to_vec());
     db
 });

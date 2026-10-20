@@ -11,6 +11,7 @@ use crate::encode::Output;
 use crate::job::DEFAULT_TEMPLATE;
 use crate::layout::Layout;
 use crate::overlay::OverlayStyle;
+use crate::subtitles::SubtitleStyle;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -40,6 +41,11 @@ pub struct Settings {
     pub layouts: Vec<Layout>,
     /// Name of the saved layout picked last for a channel: a streamer keeps the camera in one place.
     pub channel_layouts: HashMap<String, String>,
+    /// Burn in subtitles of the speech.
+    pub subtitles: bool,
+    pub subtitle_style: SubtitleStyle,
+    /// Language of the speech, like "ru"; `None` detects it.
+    pub speech_language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +73,9 @@ impl Default for Settings {
             layout: Layout::default(),
             layouts: Vec::new(),
             channel_layouts: HashMap::new(),
+            subtitles: false,
+            subtitle_style: SubtitleStyle::default(),
+            speech_language: None,
         }
     }
 }

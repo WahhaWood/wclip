@@ -9,12 +9,15 @@ pub mod layout;
 pub mod moments;
 pub mod overlay;
 pub mod settings;
+pub mod speech;
+pub mod subtitles;
 pub mod tools;
 pub mod twitch;
 pub mod updater;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -59,6 +62,10 @@ struct AppState {
     update: Mutex<Option<updater::Release>>,
     /// Updated copy to start on restart.
     update_ready: Mutex<Option<PathBuf>>,
+    /// Words of recently transcribed intervals by `words_key`.
+    words: Mutex<HashMap<String, Arc<Vec<speech::Word>>>>,
+    /// Stops the `transcribe` in progress; a newer one sets it.
+    transcribing: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 /// Payload of `clip` events: one per state change or progress tick of a clip.
@@ -67,6 +74,8 @@ struct AppState {
 enum ClipEvent {
     /// Loading the chat and its images.
     Preparing { index: usize },
+    /// Recognising the speech for subtitles.
+    Transcribing { index: usize, fraction: f64 },
     Running { index: usize, fraction: f64 },
     /// The connection dropped; the clip starts over after a pause.
     Retrying { index: usize, attempt: usize },
@@ -95,6 +104,10 @@ struct JobOptions {
     filter: chat::ChatFilter,
     /// Lay the clips out vertically.
     layout: Option<layout::Layout>,
+    /// Burn in subtitles of the speech so.
+    subtitles: Option<subtitles::SubtitleStyle>,
+    /// Language of the speech; `None` detects it.
+    language: Option<String>,
 }
 
 /// Chat of a whole video: for finding moments, and cut from without loading again.
@@ -112,6 +125,157 @@ fn chat_key(vod: &job::Vod, log: Option<&job::ChatLogRef>) -> Option<String> {
         (true, Some(log)) => Some(format!("log:{}@{}", log.path.display(), log.start)),
         (true, None) => None,
     }
+}
+
+/// Sets the flag when dropped: an aborted job stops whisper too.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The subtitles file of clip `index`: its edited captions, else the speech
+/// transcribed now, reported as `Transcribing`.
+#[allow(clippy::too_many_arguments)]
+async fn clip_subtitles(
+    app: &AppHandle,
+    tools: &tools::Tools,
+    job: &job::Job,
+    index: usize,
+    style: &subtitles::SubtitleStyle,
+    language: Option<String>,
+    layout: Option<&layout::Layout>,
+    dir: &std::path::Path,
+) -> Result<PathBuf, Failure> {
+    let interval = &job.intervals[index];
+    let captions = match job.captions.get(index).cloned().flatten() {
+        Some(captions) => captions,
+        None => {
+            let guard = CancelOnDrop(Arc::new(AtomicBool::new(false)));
+            let progress_app = app.clone();
+            let progress = move |p: i32| {
+                let _ = progress_app.emit("clip", ClipEvent::Transcribing { index, fraction: f64::from(p) / 100.0 });
+            };
+            let span = (interval.start, interval.end);
+            let words = spoken_words(app, tools, &job.vod, span, language, guard.0.clone(), progress).await?;
+            subtitles::captions(&words, style.words)
+        }
+    };
+    let (size, y) = match layout {
+        Some(l) => ((layout::WIDTH, layout::HEIGHT), l.subtitles_y),
+        // Twitch VODs are 16:9; libass needs the real proportions.
+        None => {
+            let h = job.vod.height.unwrap_or(1080);
+            (((h * 16 / 9) & !1, h), style.y)
+        }
+    };
+    let name = format!("clip-{}-{index}", std::process::id());
+    Ok(subtitles::write(dir, &name, &captions, style, size, y)?)
+}
+
+/// Transcriptions kept in memory.
+const WORDS_KEPT: usize = 64;
+
+fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("models").join(speech::MODEL_FILE))
+}
+
+/// Size is checked, not the hash: hashing 900 MB on every start takes seconds,
+/// and the download was checked.
+fn model_ready(app: &AppHandle) -> bool {
+    model_path(app).is_ok_and(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == speech::MODEL_SIZE))
+}
+
+/// Words of `start..end` of `vod`: remembered, or transcribed now (whisper on the
+/// CPU, about real time).
+async fn spoken_words(
+    app: &AppHandle,
+    tools: &tools::Tools,
+    vod: &job::Vod,
+    (start, end): (f64, f64),
+    language: Option<String>,
+    cancel: Arc<AtomicBool>,
+    on_progress: impl FnMut(i32) + Send + 'static,
+) -> Result<Arc<Vec<speech::Word>>, Failure> {
+    // A VOD playlist URL carries an expiring token; the id does not change.
+    let video = if vod.local { &vod.playlist } else { &vod.id };
+    let key = format!("{video}|{start}|{end}|{}", language.as_deref().unwrap_or("auto"));
+    let state = app.state::<AppState>();
+    if let Some(words) = state.words.lock().unwrap().get(&key) {
+        return Ok(words.clone());
+    }
+    if !model_ready(app) {
+        return Err(Failure::new(Kind::NoModel, "the speech model is not downloaded"));
+    }
+    let model = model_path(app)?;
+    let samples = cut::audio(tools, &vod.playlist, start, end - start).await.map_err(|e| Failure::new(e.kind(), e))?;
+    let words = tauri::async_runtime::spawn_blocking(move || {
+        speech::transcribe(&model, &samples, language.as_deref(), on_progress, cancel)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let words = Arc::new(words);
+    let mut cache = state.words.lock().unwrap();
+    if cache.len() >= WORDS_KEPT {
+        cache.clear();
+    }
+    cache.insert(key, words.clone());
+    Ok(words)
+}
+
+#[derive(Clone, Serialize)]
+struct Bytes {
+    done: u64,
+    total: Option<u64>,
+}
+
+#[tauri::command]
+fn speech_model_ready(app: AppHandle) -> bool {
+    model_ready(&app)
+}
+
+/// Downloads the speech model (~900 MB), reporting `model-progress` events.
+#[tauri::command]
+async fn speech_model_install(app: AppHandle) -> Result<(), Failure> {
+    let path = model_path(&app)?;
+    std::fs::create_dir_all(path.parent().expect("in a directory")).map_err(Failure::from)?;
+    let client = updater_client()?;
+    let emit = |done, total| {
+        let _ = app.emit("model-progress", Bytes { done, total });
+    };
+    tools::download_checked(&client, &speech::model_url(), speech::MODEL_SHA256, &path, &emit)
+        .await
+        .map_err(|e| log("speech model", Failure::new(Kind::Network, e)))
+}
+
+/// Captions of `start..end` of `vod` for editing, `words` at most in each,
+/// reporting `transcribe-progress` (percent). A newer call stops this one.
+#[tauri::command]
+async fn transcribe(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    vod: job::Vod,
+    start: f64,
+    end: f64,
+    language: Option<String>,
+    words: usize,
+) -> Result<Vec<subtitles::Caption>, Failure> {
+    let tools = ready_tools(&state)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    if let Some(previous) = state.transcribing.lock().unwrap().replace(cancel.clone()) {
+        previous.store(true, Ordering::Relaxed);
+    }
+    let task_app = app.clone();
+    let progress = move |p: i32| {
+        let _ = task_app.emit("transcribe-progress", p);
+    };
+    let spoken = spoken_words(&app, &tools, &vod, (start, end), language, cancel.clone(), progress).await;
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    Ok(subtitles::captions(&spoken.map_err(|e| log("transcribe", e))?, words))
 }
 
 /// Preview frames kept: two per interval while adjusting a few of them.
@@ -361,6 +525,7 @@ fn job_start(
     let template = name_template.unwrap_or_default();
     std::fs::create_dir_all(&out_dir).map_err(|e| log("out dir", e.into()))?;
     let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("images");
+    let subs_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("subs");
     // Without a timeout a request on a dropped connection can hang forever.
     let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
 
@@ -426,13 +591,28 @@ fn job_start(
             // An empty panel would only cover the video.
             let no_chat = chat.as_ref().is_some_and(|c| c.messages.is_empty());
             let chat = chat.filter(|c| !c.messages.is_empty());
+            let subtitles = match &options.subtitles {
+                Some(style) => {
+                    let language = options.language.clone();
+                    clip_subtitles(&app, &tools, &job, index, style, language, options.layout.as_ref(), &subs_dir).await.map(Some)
+                }
+                None => Ok(None),
+            };
+            let subtitles = match subtitles {
+                Ok(subtitles) => subtitles,
+                Err(e) => {
+                    let _ = app.emit("clip", ClipEvent::Failed { index, error: log(&format!("clip {} subtitles", index + 1), e) });
+                    continue;
+                }
+            };
             let out = job::clip_path(&out_dir, &template, &job.vod, interval, index + 1);
             let progress = |fraction| {
                 let _ = app.emit("clip", ClipEvent::Running { index, fraction });
             };
             let mut attempt = 0;
             let event = loop {
-                let cut_options = cut::CutOptions { video, chat: options.chat_output, layout: options.layout.clone() };
+                let cut_options =
+                    cut::CutOptions { video, chat: options.chat_output, layout: options.layout.clone(), subtitles: subtitles.clone() };
                 match cut::cut(&tools, &job.vod.playlist, interval, chat.clone(), cut_options, &out, progress).await {
                     Ok(()) => {
                         done.push((out.clone(), interval.clone()));
@@ -456,6 +636,9 @@ fn job_start(
                     }
                 }
             };
+            if let Some(file) = &subtitles {
+                let _ = std::fs::remove_file(file);
+            }
             let _ = app.emit("clip", event);
         }
         if options.merge && done.len() >= 2 {
@@ -571,7 +754,10 @@ pub fn run() {
             error_log,
             update_check,
             update_install,
-            update_restart
+            update_restart,
+            speech_model_ready,
+            speech_model_install,
+            transcribe
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
