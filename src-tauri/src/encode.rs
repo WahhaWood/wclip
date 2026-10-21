@@ -101,8 +101,12 @@ impl Output {
             codec.extend([flag.to_owned(), level.to_string()]);
         }
         if hevc {
-            // Apple players and some editors refuse HEVC in MP4 tagged `hev1`.
-            codec.extend(["-tag:v".to_owned(), "hvc1".to_owned()]);
+            // Apple players and some editors refuse HEVC in MP4 tagged `hev1`. With
+            // `hvc1` the muxer drops the parameter sets from the stream and keeps the
+            // header ffmpeg wrote before encoding, but Mesa's VAAPI writes its own
+            // SPS/PPS (other QP, dependent slices): the clip decodes green and broken.
+            // The filter takes the header from the stream instead.
+            codec.extend(["-tag:v", "hvc1", "-bsf:v", "extract_extradata"].map(str::to_owned));
         }
         let (global, filter) = match self.encoder {
             Encoder::Vaapi => (vec!["-vaapi_device".to_owned(), vaapi_device().to_string_lossy().into_owned()], "format=nv12,hwupload"),
@@ -181,7 +185,7 @@ mod tests {
         let a = o.args();
         assert_eq!(a.codec[1], "hevc_nvenc");
         assert!(a.codec.windows(2).any(|w| w == ["-cq", "28"]));
-        assert!(a.codec.ends_with(&["-tag:v".to_owned(), "hvc1".to_owned()]));
+        assert!(a.codec.ends_with(&["-tag:v", "hvc1", "-bsf:v", "extract_extradata"].map(str::to_owned)));
 
         let v = Output { encoder: Encoder::Vaapi, ..Output::default() }.args();
         assert_eq!(v.global[0], "-vaapi_device");
@@ -207,5 +211,43 @@ mod tests {
             println!("{codec:?}: {:?}", available(&tools, codec).await);
         }
         assert!(works(&tools, Output::default().on_cpu()).await);
+    }
+
+    /// MP4 from every working encoder decodes close to its source (Mesa's VAAPI HEVC
+    /// with `hvc1` used to come out green): `cargo test -- --ignored smoke_mp4_decodes --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn smoke_mp4_decodes() {
+        let tools = Tools { ffmpeg: "ffmpeg".into(), ffprobe: "ffprobe".into(), yt_dlp: "yt-dlp".into() };
+        let dir = std::env::temp_dir().join(format!("wclip-test-encoders-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = "testsrc2=s=1080x1920:r=60:d=2";
+        for codec in [Codec::H264, Codec::Hevc] {
+            for encoder in std::iter::once(Encoder::Cpu).chain(available(&tools, codec).await) {
+                let args = Output { encoder, codec, quality: Quality::High }.args();
+                let out = dir.join(format!("{encoder:?}_{codec:?}.mp4"));
+                let status = std::process::Command::new("ffmpeg")
+                    .args(["-hide_banner", "-loglevel", "error", "-y"])
+                    .args(&args.global)
+                    .args(["-f", "lavfi", "-i", source, "-vf", &args.filter])
+                    .args(&args.codec)
+                    .arg(&out)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                let psnr = std::process::Command::new("ffmpeg")
+                    .args(["-hide_banner", "-i"])
+                    .arg(&out)
+                    .args(["-f", "lavfi", "-i", source])
+                    .args(["-filter_complex", "[0:v]format=yuv420p[a];[1:v]format=yuv420p[b];[a][b]psnr", "-f", "null", "-"])
+                    .output()
+                    .unwrap();
+                let log = String::from_utf8_lossy(&psnr.stderr);
+                let average: f64 = log.split("average:").nth(1).and_then(|s| s.split_whitespace().next()).unwrap().parse().unwrap();
+                println!("{encoder:?} {codec:?}: PSNR {average:.1} dB");
+                assert!(average > 35.0, "{encoder:?} {codec:?} decodes broken");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

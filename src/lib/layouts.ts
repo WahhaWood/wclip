@@ -29,6 +29,7 @@ export const PRESETS: Layout[] = [
     blur: true,
     color: [0, 0, 0],
     chat: chat(1490, 400),
+    subtitlesX: 0.5,
     // On the seam between the camera and the game.
     subtitlesY: 0.32,
   },
@@ -38,6 +39,7 @@ export const PRESETS: Layout[] = [
     blur: true,
     color: [0, 0, 0],
     chat: chat(1300, 560),
+    subtitlesX: 0.5,
     subtitlesY: 0.25,
   },
   {
@@ -46,6 +48,7 @@ export const PRESETS: Layout[] = [
     blur: true,
     color: [0, 0, 0],
     chat: chat(1220, 560),
+    subtitlesX: 0.5,
     subtitlesY: 0.55,
   },
 ];
@@ -69,13 +72,28 @@ export function moveArea(area: Area, dx: number, dy: number): Area {
   return { ...area, x: clamp(area.x + dx, 0, 1 - area.w), y: clamp(area.y + dy, 0, 1 - area.h) };
 }
 
-/**
- * `area` with a corner dragged by (dx, dy) fractions; `right` and `bottom` say
- * which corner. The opposite corner stays.
- */
-export function resizeArea(area: Area, dx: number, dy: number, right: boolean, bottom: boolean): Area {
-  const [x, w] = resizeAxis(area.x, area.w, dx, right);
-  const [y, h] = resizeAxis(area.y, area.h, dy, bottom);
+/** A handle: the side it moves on each axis, -1 left or top, 1 right or bottom, 0 neither. */
+export type Handle = [number, number];
+
+/** Corners, then the middles of the sides. */
+export const HANDLES: Handle[] = [
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1],
+  [0, -1],
+  [0, 1],
+  [-1, 0],
+  [1, 0],
+];
+
+export const handleCursor = ([hx, hy]: Handle) =>
+  !hx ? "ns-resize" : !hy ? "ew-resize" : hx === hy ? "nwse-resize" : "nesw-resize";
+
+/** `area` with handle `h` dragged by (dx, dy) fractions; the opposite sides stay. */
+export function resizeArea(area: Area, dx: number, dy: number, [hx, hy]: Handle): Area {
+  const [x, w] = hx ? resizeAxis(area.x, area.w, dx, hx > 0) : [area.x, area.w];
+  const [y, h] = hy ? resizeAxis(area.y, area.h, dy, hy > 0) : [area.y, area.h];
   return { x, y, w, h };
 }
 
@@ -84,4 +102,41 @@ function resizeAxis(pos: number, size: number, d: number, far: boolean): [number
   const end = pos + size;
   const start = clamp(pos + d, 0, end - MIN_AREA);
   return [start, end - start];
+}
+
+/** Narrowest piece on the canvas, pixels. */
+export const MIN_PIECE = 100;
+
+/**
+ * `piece` scaled by corner handle `h` dragged by (dx, dy) canvas pixels: the
+ * proportions and the opposite corner stay.
+ */
+export function scalePiece(piece: Piece, dx: number, dy: number, [hx, hy]: Handle, aspect: number): Piece {
+  const height = pieceHeight(piece, aspect);
+  const byX = hx * dx;
+  const byY = (hy * dy * piece.width) / height;
+  const grow = Math.abs(byX) >= Math.abs(byY) ? byX : byY;
+  const width = Math.round(clamp(piece.width + grow, MIN_PIECE, 2 * CANVAS_W));
+  const next = { ...piece, width };
+  if (hx < 0) next.x = piece.x + piece.width - width;
+  if (hy < 0) next.y = piece.y + height - pieceHeight(next, aspect);
+  return next;
+}
+
+/**
+ * `piece` with side handle `h` dragged by (dx, dy) canvas pixels: the side shows
+ * more or less of the frame at the same scale, so only that side moves.
+ */
+export function cropPiece(piece: Piece, dx: number, dy: number, h: Handle, aspect: number): Piece {
+  // Canvas pixels per frame width and per frame height.
+  const kx = piece.width / piece.src.w;
+  const ky = kx / aspect;
+  const src = resizeArea(piece.src, dx / kx, dy / ky, h);
+  return {
+    ...piece,
+    src,
+    x: piece.x + Math.round((src.x - piece.src.x) * kx),
+    y: piece.y + Math.round((src.y - piece.src.y) * ky),
+    width: Math.round(src.w * kx),
+  };
 }

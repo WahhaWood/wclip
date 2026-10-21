@@ -20,7 +20,8 @@ pub struct Layout {
     pub color: [u8; 3],
     /// Where the chat panel goes, if the clip has chat.
     pub chat: ChatBox,
-    /// Height of the subtitles' middle, as a fraction of the canvas.
+    /// Middle of the subtitles, as fractions of the canvas width and height.
+    pub subtitles_x: f64,
     pub subtitles_y: f64,
 }
 
@@ -32,6 +33,7 @@ impl Default for Layout {
             blur: true,
             color: [0, 0, 0],
             chat: ChatBox::default(),
+            subtitles_x: 0.5,
             subtitles_y: 0.55,
         }
     }

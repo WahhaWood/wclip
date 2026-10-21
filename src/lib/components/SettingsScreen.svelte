@@ -7,6 +7,7 @@
   import { explain } from "$lib/errors";
   import { app, showUpdate } from "$lib/state.svelte";
   import { parseTime } from "$lib/time";
+  import SubtitleBox from "./SubtitleBox.svelte";
   import SubtitleSettings from "./SubtitleSettings.svelte";
 
   // The parent renders this screen only once settings are loaded.
@@ -309,12 +310,15 @@
               ></span>
             {/each}
           </div>
+          {#if s.subtitles}
+            <SubtitleBox bind:x={s.subtitleStyle.x} bind:y={s.subtitleStyle.y} k={scale} />
+          {/if}
           {#if frameLoading && !frame}
             <span class="badge dim">Загружаем кадр…</span>
           {/if}
         </div>
         <p class="dim hint">
-          Тяните панель, чтобы сдвинуть, за углы — чтобы изменить размер.
+          Тяните панель, чтобы сдвинуть, за углы — чтобы изменить размер.{s.subtitles ? " Субтитры тоже можно тянуть." : ""}
           {app.vod ? "Кадр из открытой записи, сообщения для примера." : "Откройте запись, чтобы увидеть её кадр."}
         </p>
         {#if frameError || panelError}
@@ -452,7 +456,7 @@
     </div>
   </section>
 
-  <SubtitleSettings />
+  <SubtitleSettings {frame} />
 
   <section class="glass card">
     <h2>Видео</h2>

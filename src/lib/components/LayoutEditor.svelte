@@ -5,16 +5,22 @@
   import {
     CANVAS_H,
     CANVAS_W,
+    HANDLES,
     PRESETS,
     SOURCE_ASPECT,
     copyLayout,
+    cropPiece,
+    handleCursor,
     moveArea,
     newPiece,
     pieceHeight,
     resizeArea,
+    scalePiece,
+    type Handle,
   } from "$lib/layouts";
   import { app } from "$lib/state.svelte";
   import { parseTime } from "$lib/time";
+  import SubtitleBox from "./SubtitleBox.svelte";
 
   // The parent renders this screen only once settings are loaded.
   const s = $derived(app.settings as Settings);
@@ -34,7 +40,6 @@
   /** Canvas pixels per screen pixel. */
   const canvasScale = $derived(canvasWidth ? CANVAS_W / canvasWidth : 0);
 
-  const MIN_WIDTH = 100;
   const MIN_CHAT = 150;
   const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(v, hi));
   const pct = (v: number, of: number) => `${(v / of) * 100}%`;
@@ -106,10 +111,9 @@
   });
 
   type Target =
-    | { kind: "src"; i: number; corner: [boolean, boolean] | null }
-    | { kind: "piece"; i: number; resize: boolean }
-    | { kind: "chat"; corner: [boolean, boolean] | null }
-    | { kind: "subs" };
+    | { kind: "src"; i: number; handle: Handle | null }
+    | { kind: "piece"; i: number; handle: Handle | null }
+    | { kind: "chat"; corner: [boolean, boolean] | null };
   type Drag = { target: Target; px: number; py: number; start: Layout };
   let drag = $state<Drag | null>(null);
 
@@ -132,22 +136,18 @@
       const dx = mx / sourceWidth;
       const dy = my / (sourceWidth / aspect);
       const area = start.pieces[target.i].src;
-      layout.pieces[target.i].src = target.corner
-        ? resizeArea(area, dx, dy, ...target.corner)
-        : moveArea(area, dx, dy);
+      layout.pieces[target.i].src = target.handle ? resizeArea(area, dx, dy, target.handle) : moveArea(area, dx, dy);
       return;
     }
     const dx = Math.round(mx * canvasScale);
     const dy = Math.round(my * canvasScale);
-    if (target.kind === "subs") {
-      layout.subtitlesY = clamp(start.subtitlesY + dy / CANVAS_H, 0.05, 0.95);
-      return;
-    }
     if (target.kind === "piece") {
       const from = start.pieces[target.i];
-      const piece = layout.pieces[target.i];
-      if (target.resize) piece.width = clamp(from.width + dx, MIN_WIDTH, 2 * CANVAS_W);
-      else [piece.x, piece.y] = [from.x + dx, from.y + dy];
+      const h = target.handle;
+      // A corner scales the piece; a side shows more or less of the frame.
+      if (!h) layout.pieces[target.i] = { ...from, x: from.x + dx, y: from.y + dy };
+      else if (h[0] && h[1]) layout.pieces[target.i] = scalePiece(from, dx, dy, h, aspect);
+      else layout.pieces[target.i] = cropPiece(from, dx, dy, h, aspect);
       return;
     }
     const from = start.chat;
@@ -285,18 +285,20 @@
               style:top={pct(p.src.y, 1)}
               style:width={pct(p.src.w, 1)}
               style:height={pct(p.src.h, 1)}
-              onpointerdown={(e) => startDrag(e, { kind: "src", i, corner: null })}
+              onpointerdown={(e) => startDrag(e, { kind: "src", i, handle: null })}
             >
               <span class="label">{p.name}</span>
-              {#each corners as corner (corner.join())}
-                <span
-                  class="handle"
-                  style:left={corner[0] ? "100%" : "0"}
-                  style:top={corner[1] ? "100%" : "0"}
-                  style:cursor={corner[0] === corner[1] ? "nwse-resize" : "nesw-resize"}
-                  onpointerdown={(e) => startDrag(e, { kind: "src", i, corner })}
-                ></span>
-              {/each}
+              {#if i === selected}
+                {#each HANDLES as handle (handle.join())}
+                  <span
+                    class="handle"
+                    style:left="{(handle[0] + 1) * 50}%"
+                    style:top="{(handle[1] + 1) * 50}%"
+                    style:cursor={handleCursor(handle)}
+                    onpointerdown={(e) => startDrag(e, { kind: "src", i, handle })}
+                  ></span>
+                {/each}
+              {/if}
             </div>
           {/each}
         </div>
@@ -362,7 +364,7 @@
               style:top={pct(p.y, CANVAS_H)}
               style:width={pct(p.width, CANVAS_W)}
               style:height={pct(pieceHeight(p, aspect), CANVAS_H)}
-              onpointerdown={(e) => startDrag(e, { kind: "piece", i, resize: false })}
+              onpointerdown={(e) => startDrag(e, { kind: "piece", i, handle: null })}
             >
               <div class="crop">
                 {#if frame}
@@ -377,13 +379,17 @@
                   />
                 {/if}
               </div>
-              <span
-                class="handle"
-                style:left="100%"
-                style:top="100%"
-                style:cursor="nwse-resize"
-                onpointerdown={(e) => startDrag(e, { kind: "piece", i, resize: true })}
-              ></span>
+              {#if i === selected}
+                {#each HANDLES as handle (handle.join())}
+                  <span
+                    class="handle"
+                    style:left="{(handle[0] + 1) * 50}%"
+                    style:top="{(handle[1] + 1) * 50}%"
+                    style:cursor={handleCursor(handle)}
+                    onpointerdown={(e) => startDrag(e, { kind: "piece", i, handle })}
+                  ></span>
+                {/each}
+              {/if}
             </div>
           {/each}
           {#if s.chat}
@@ -411,19 +417,7 @@
             </div>
           {/if}
           {#if s.subtitles}
-            {@const st = s.subtitleStyle}
-            {@const k = canvasWidth / CANVAS_W}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div
-              class="subs"
-              style:top="{layout.subtitlesY * 100}%"
-              style:font-size="{st.size * k}px"
-              style:-webkit-text-stroke="{Math.max(1, st.outline * k)}px var(--bg)"
-              style:color={hex(st.color)}
-              onpointerdown={(e) => startDrag(e, { kind: "subs" })}
-            >
-              {st.uppercase ? "СУБТИТРЫ ЗДЕСЬ" : "Субтитры здесь"}
-            </div>
+            <SubtitleBox bind:x={layout.subtitlesX} bind:y={layout.subtitlesY} k={canvasWidth / CANVAS_W} />
           {/if}
         </div>
         {#if panelError}
@@ -448,8 +442,8 @@
           {/if}
         </div>
         <p class="dim hint">
-          Тяните фрагменты, чат и субтитры, за угол — размер. Шрифт, фон и подложка чата — из настроек оверлея, вид
-          субтитров — из настроек субтитров.
+          Тяните фрагменты, чат и субтитры. Угол фрагмента меняет его размер, сторона — обрезает или открывает кадр
+          с этой стороны. Шрифт, фон и подложка чата — из настроек оверлея, вид субтитров — из настроек субтитров.
         </p>
       </div>
     </div>
@@ -557,20 +551,6 @@
 
   .chat {
     outline: 1px dashed var(--tertiary);
-  }
-
-  .subs {
-    position: absolute;
-    left: 4%;
-    right: 4%;
-    transform: translateY(-50%);
-    text-align: center;
-    font-family: Inter, sans-serif;
-    font-weight: 700;
-    line-height: 1.15;
-    paint-order: stroke fill;
-    outline: 1px dashed var(--primary);
-    cursor: ns-resize;
   }
 
   .chat img {

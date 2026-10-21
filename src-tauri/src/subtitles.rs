@@ -34,8 +34,9 @@ pub struct SubtitleStyle {
     pub uppercase: bool,
     /// Most words in a caption.
     pub words: usize,
-    /// Height of the caption's middle in a 16:9 clip, as a fraction of the frame;
-    /// vertical clips take it from the layout.
+    /// Middle of the caption in a 16:9 clip, as fractions of the frame's width
+    /// and height; vertical clips take it from the layout.
+    pub x: f64,
     pub y: f64,
 }
 
@@ -49,6 +50,7 @@ impl Default for SubtitleStyle {
             outline: 5.0,
             uppercase: true,
             words: 3,
+            x: 0.5,
             y: 0.8,
         }
     }
@@ -97,8 +99,9 @@ pub fn captions(words: &[Word], max_words: usize) -> Vec<Caption> {
         .collect()
 }
 
-/// ASS for a `width` x `height` clip with captions centred at `y` (fraction of the height).
-pub fn ass(captions: &[Caption], style: &SubtitleStyle, width: u32, height: u32, y: f64) -> String {
+/// ASS for a `width` x `height` clip with captions centred at `at` (fractions of the
+/// width and height).
+pub fn ass(captions: &[Caption], style: &SubtitleStyle, width: u32, height: u32, at: (f64, f64)) -> String {
     let k = width.min(height) as f32 / 1080.0;
     let bold = -1;
     let mut out = format!(
@@ -116,7 +119,11 @@ pub fn ass(captions: &[Caption], style: &SubtitleStyle, width: u32, height: u32,
         (60.0 * k).round(),
         (60.0 * k).round(),
     );
-    let pos = format!("{{\\pos({},{})}}", width / 2, (y.clamp(0.0, 1.0) * f64::from(height)).round());
+    let pos = format!(
+        "{{\\pos({},{})}}",
+        (at.0.clamp(0.0, 1.0) * f64::from(width)).round(),
+        (at.1.clamp(0.0, 1.0) * f64::from(height)).round()
+    );
     for c in captions {
         let text = if style.uppercase { c.text.to_uppercase() } else { c.text.clone() };
         let words: Vec<String> = text.split_whitespace().map(ass_text).collect();
@@ -154,7 +161,7 @@ fn word_times(c: &Caption, n: usize) -> Vec<f64> {
 
 /// Writes `captions` as `<dir>/<name>.ass` for `CutOptions::subtitles`, with the
 /// bundled font in `<dir>/fonts`. `name` must be plain: letters, digits, `-`, `_`.
-pub fn write(dir: &Path, name: &str, captions: &[Caption], style: &SubtitleStyle, size: (u32, u32), y: f64) -> std::io::Result<PathBuf> {
+pub fn write(dir: &Path, name: &str, captions: &[Caption], style: &SubtitleStyle, size: (u32, u32), at: (f64, f64)) -> std::io::Result<PathBuf> {
     let fonts = dir.join("fonts");
     std::fs::create_dir_all(&fonts)?;
     let font = fonts.join("Inter-Bold.ttf");
@@ -162,7 +169,7 @@ pub fn write(dir: &Path, name: &str, captions: &[Caption], style: &SubtitleStyle
         std::fs::write(&font, INTER_BOLD)?;
     }
     let file = dir.join(format!("{name}.ass"));
-    std::fs::write(&file, ass(captions, style, size.0, size.1, y))?;
+    std::fs::write(&file, ass(captions, style, size.0, size.1, at))?;
     Ok(file)
 }
 
@@ -216,7 +223,7 @@ mod tests {
     fn ass_highlights_each_word_in_turn() {
         let c = Caption { start: 1.0, end: 2.5, text: "hi {there}".into(), words: vec![1.0, 1.5] };
         let style = SubtitleStyle::default();
-        let text = ass(std::slice::from_ref(&c), &style, 1080, 1920, 0.5);
+        let text = ass(std::slice::from_ref(&c), &style, 1080, 1920, (0.5, 0.5));
         assert!(text.contains("PlayResX: 1080\nPlayResY: 1920\n"), "{text}");
         assert!(text.contains("Style: Default,Inter,64,&H00FFFFFF&,&H00FFFFFF&,&H00000000,&H80000000,-1,"), "{text}");
         let events: Vec<&str> = text.lines().filter(|l| l.starts_with("Dialogue:")).collect();
@@ -227,11 +234,13 @@ mod tests {
                 "Dialogue: 0,0:00:01.50,0:00:02.50,Default,,0,0,0,,{\\pos(540,960)}HI {\\c&H0000D6FF&}(THERE){\\c&H00FFFFFF&}",
             ]
         );
+        // Placed anywhere on the frame.
+        assert!(ass(std::slice::from_ref(&c), &style, 1280, 720, (0.25, 0.8)).contains("{\\pos(320,576)}"));
         // An edited text shares the time evenly.
         let edited = Caption { text: "one two three".into(), ..c };
         assert_eq!(word_times(&edited, 3), [1.0, 1.5, 2.0]);
         // A 16:9 frame scales by its height.
-        assert!(ass(&[], &style, 1280, 720, 0.8).contains("Style: Default,Inter,43,"));
+        assert!(ass(&[], &style, 1280, 720, (0.5, 0.8)).contains("Style: Default,Inter,43,"));
         assert_eq!(ass_time(3725.456), "1:02:05.46");
     }
 }

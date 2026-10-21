@@ -35,7 +35,7 @@ export type Job = { vod: Vod; intervals: Interval[]; chat_log: ChatLogRef | null
 
 /** A caption on screen, seconds of the clip; `words` are when each word of `text` starts. */
 export type Caption = { start: number; end: number; text: string; words: number[] };
-/** Sizes are pixels on a frame whose short side is 1080; `y` is for 16:9 clips. */
+/** Sizes are pixels on a frame whose short side is 1080; `x`, `y` are for 16:9 clips. */
 export type SubtitleStyle = {
   font: string;
   size: number;
@@ -46,7 +46,8 @@ export type SubtitleStyle = {
   uppercase: boolean;
   /** Most words in a caption. */
   words: number;
-  /** Height of the caption's middle, a fraction of the frame. */
+  /** Middle of the caption, fractions of the frame's width and height. */
+  x: number;
   y: number;
 };
 
@@ -82,7 +83,8 @@ export type Layout = {
   blur: boolean;
   color: [number, number, number];
   chat: ChatBox;
-  /** Height of the subtitles' middle, a fraction of the canvas. */
+  /** Middle of the subtitles, fractions of the canvas width and height. */
+  subtitlesX: number;
   subtitlesY: number;
 };
 

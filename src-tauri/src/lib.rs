@@ -163,16 +163,16 @@ async fn clip_subtitles(
             subtitles::captions(&words, style.words)
         }
     };
-    let (size, y) = match layout {
-        Some(l) => ((layout::WIDTH, layout::HEIGHT), l.subtitles_y),
+    let (size, at) = match layout {
+        Some(l) => ((layout::WIDTH, layout::HEIGHT), (l.subtitles_x, l.subtitles_y)),
         // Twitch VODs are 16:9; libass needs the real proportions.
         None => {
             let h = job.vod.height.unwrap_or(1080);
-            (((h * 16 / 9) & !1, h), style.y)
+            (((h * 16 / 9) & !1, h), (style.x, style.y))
         }
     };
     let name = format!("clip-{}-{index}", std::process::id());
-    Ok(subtitles::write(dir, &name, &captions, style, size, y)?)
+    Ok(subtitles::write(dir, &name, &captions, style, size, at)?)
 }
 
 /// Transcriptions kept in memory.

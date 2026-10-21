@@ -4,6 +4,10 @@
   import { api, type Settings } from "$lib/api";
   import { explain } from "$lib/errors";
   import { app } from "$lib/state.svelte";
+  import SubtitleBox from "./SubtitleBox.svelte";
+
+  /** A frame of the open video for the preview. */
+  let { frame }: { frame: string | null } = $props();
 
   // The parent renders this only once settings are loaded.
   const s = $derived(app.settings as Settings);
@@ -49,11 +53,6 @@
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
 
-  /** The sample caption, highlighted word second; sizes scale with the box. */
-  const sample = $derived.by(() => {
-    const words = ["Пример", "субтитров", "здесь"].slice(0, Math.max(1, style.words));
-    return style.uppercase ? words.map((w) => w.toUpperCase()) : words;
-  });
   let previewHeight = $state(0);
   const k = $derived(previewHeight / 1080);
 </script>
@@ -91,19 +90,11 @@
 
     <span>Вид</span>
     <div class="controls">
-      <div
-        class="preview"
-        bind:clientHeight={previewHeight}
-        style:--size="{style.size * k}px"
-        style:--outline="{Math.max(1, style.outline * k)}px"
-        style:--color={hex(style.color)}
-        style:--highlight={hex(style.highlight)}
-      >
-        <span class="caption" style:top="{style.y * 100}%">
-          {#each sample as word, i (i)}
-            <span class:lit={i === Math.min(1, sample.length - 1)}>{word}</span>{" "}
-          {/each}
-        </span>
+      <div class="preview" bind:clientHeight={previewHeight}>
+        {#if frame}
+          <img src={frame} alt="" draggable="false" />
+        {/if}
+        <SubtitleBox bind:x={style.x} bind:y={style.y} {k} />
       </div>
       <label class="control">
         <span>Размер <b>{style.size}</b></span>
@@ -116,10 +107,6 @@
       <label class="control">
         <span>Слов в титре <b>{style.words}</b></span>
         <input type="range" min="1" max="8" step="1" bind:value={style.words} />
-      </label>
-      <label class="control">
-        <span>Высота в 16:9 <b>{Math.round(style.y * 100)}%</b></span>
-        <input type="range" min="0.1" max="0.95" step="0.01" bind:value={style.y} />
       </label>
       <div class="line">
         <label class="line">
@@ -142,7 +129,8 @@
     </div>
   </div>
   <p class="dim hint">
-    В вертикальном видео высота субтитров задаётся в раскладке. Шрифт — Inter Bold, как в превью.
+    Тяните субтитры на превью, чтобы поставить их в кадре 16:9; на превью — первый поправленный титр интервалов, если
+    он есть. В вертикальном видео место субтитров задаётся в раскладке. Шрифт — Inter Bold, как в превью.
   </p>
 </section>
 
@@ -198,23 +186,13 @@
     overflow: hidden;
   }
 
-  .caption {
+  .preview img {
     position: absolute;
-    left: 5%;
-    right: 5%;
-    transform: translateY(-50%);
-    text-align: center;
-    font-family: Inter, sans-serif;
-    font-weight: 700;
-    font-size: var(--size);
-    line-height: 1.15;
-    color: var(--color);
-    -webkit-text-stroke: var(--outline) var(--bg);
-    paint-order: stroke fill;
-  }
-
-  .lit {
-    color: var(--highlight);
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    pointer-events: none;
   }
 
   .control {

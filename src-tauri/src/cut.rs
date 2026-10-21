@@ -766,10 +766,6 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok);
-        let gpus = crate::encode::available(&tools, crate::encode::Codec::H264).await;
-        let video = crate::encode::resolve(Output::default(), &gpus);
-        println!("GPU encoders {gpus:?}, using {:?}", video.encoder);
-
         let message = ChatMessage {
             time: 1.0,
             name: "alice".into(),
@@ -779,24 +775,33 @@ mod tests {
         };
         let style = OverlayStyle::default().scaled(720);
         let chat = ChatOverlay { style: style.clone(), messages: vec![message], images: Images::default() };
-        let options = CutOptions { video, chat: ChatOutput::Both, ..CutOptions::default() };
         let playlist = source.to_string_lossy().into_owned();
-        let (a, b) = (dir.join("a.mp4"), dir.join("b.mp4"));
-        for (out, start) in [(&a, 0.5), (&b, 3.0)] {
-            let interval = Interval { start, end: start + 2.0, name: String::new() };
-            cut(&tools, &playlist, &interval, Some(chat.clone()), options.clone(), out, |_| {}).await.unwrap();
-        }
-        let chat_file = chat_path(&a);
-        // ProRes 4444 decodes as 12 bit whatever it was encoded from.
-        let stream = probe(&tools, &chat_file, "stream=codec_name,width,pix_fmt");
-        assert!(stream.starts_with(&format!("prores,{},yuva444", style.width)), "{stream}");
-        assert!((probe(&tools, &chat_file, "format=duration").parse::<f64>().unwrap() - 2.0).abs() < 0.1);
-        assert!(!chat_file.with_extension("mov.part").exists());
+        for codec in [crate::encode::Codec::H264, crate::encode::Codec::Hevc] {
+            let gpus = crate::encode::available(&tools, codec).await;
+            let video = crate::encode::resolve(Output { codec, ..Output::default() }, &gpus);
+            println!("{codec:?}: GPU encoders {gpus:?}, using {:?}", video.encoder);
+            let options = CutOptions { video, chat: ChatOutput::Both, ..CutOptions::default() };
+            let (a, b) = (dir.join(format!("a-{codec:?}.mp4")), dir.join(format!("b-{codec:?}.mp4")));
+            for (out, start) in [(&a, 0.5), (&b, 3.0)] {
+                let interval = Interval { start, end: start + 2.0, name: String::new() };
+                cut(&tools, &playlist, &interval, Some(chat.clone()), options.clone(), out, |_| {}).await.unwrap();
+            }
+            let chat_file = chat_path(&a);
+            // ProRes 4444 decodes as 12 bit whatever it was encoded from.
+            let stream = probe(&tools, &chat_file, "stream=codec_name,width,pix_fmt");
+            assert!(stream.starts_with(&format!("prores,{},yuva444", style.width)), "{stream}");
+            assert!((probe(&tools, &chat_file, "format=duration").parse::<f64>().unwrap() - 2.0).abs() < 0.1);
+            assert!(!chat_file.with_extension("mov.part").exists());
 
-        let merged = dir.join("merged.mp4");
-        concat(&tools, &[a, b], &merged).await.unwrap();
-        let duration: f64 = probe(&tools, &merged, "format=duration").parse().unwrap();
-        assert!((duration - 4.0).abs() < 0.1, "merged {duration}");
+            let merged = dir.join(format!("merged-{codec:?}.mp4"));
+            concat(&tools, &[a, b], &merged).await.unwrap();
+            let duration: f64 = probe(&tools, &merged, "format=duration").parse().unwrap();
+            assert!((duration - 4.0).abs() < 0.1, "merged {duration}");
+            // Decodes cleanly: Mesa's VAAPI HEVC once came out green and broken.
+            let decode =
+                tools::command(&tools.ffmpeg).args(["-v", "error", "-i"]).arg(&merged).args(["-f", "null", "-"]).output().unwrap();
+            assert!(decode.status.success() && decode.stderr.is_empty(), "{}", String::from_utf8_lossy(&decode.stderr));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -877,7 +882,7 @@ mod tests {
         let captions = [Caption { start: 0.0, end: 3.0, text: "███ ███".into(), words: vec![0.0, 1.5] }];
         let style = SubtitleStyle { size: 120.0, ..SubtitleStyle::default() };
         let subs_dir = dir.join("odd: dir, [1]");
-        let file = subtitles::write(&subs_dir, "clip-1", &captions, &style, (1280, 720), 0.5).unwrap();
+        let file = subtitles::write(&subs_dir, "clip-1", &captions, &style, (1280, 720), (0.5, 0.5)).unwrap();
         let options = CutOptions { subtitles: Some(file), ..CutOptions::default() };
         let out = dir.join("subs.mp4");
         let interval = Interval { start: 0.0, end: 3.0, name: String::new() };
@@ -924,7 +929,7 @@ mod tests {
             println!("{:>5.2}-{:<5.2} {}", c.start, c.end, c.text);
         }
         let layout = Layout { subtitles_y: 0.5, ..Layout::default() };
-        let file = subtitles::write(&dir.join("subs"), "clip", &captions, &style, (1080, 1920), layout.subtitles_y).unwrap();
+        let file = subtitles::write(&dir.join("subs"), "clip", &captions, &style, (1080, 1920), (layout.subtitles_x, layout.subtitles_y)).unwrap();
         let options = CutOptions { layout: Some(layout), subtitles: Some(file), ..CutOptions::default() };
         let out = dir.join("subs.mp4");
         cut(&tools, &vod.playlist, &interval, None, options, &out, |_| {}).await.unwrap();
