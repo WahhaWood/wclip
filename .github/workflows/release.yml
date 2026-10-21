@@ -13,14 +13,14 @@ jobs:
   linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag matches app version
         if: github.ref_type == 'tag'
         run: test "v$(node -p "require('./src-tauri/tauri.conf.json').version")" = "$GITHUB_REF_NAME"
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential file libxdo-dev libayatana-appindicator3-dev librsvg2-dev
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
@@ -28,14 +28,14 @@ jobs:
       - run: npm ci
       - run: npm run tauri build -- --bundles appimage
       - run: cp src-tauri/target/release/bundle/appimage/*.AppImage WClip-linux-x86_64.AppImage
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: linux, path: WClip-linux-x86_64.AppImage }
 
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: npm }
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
@@ -44,7 +44,7 @@ jobs:
       # Portable exe only: the installers are not shipped.
       - run: npm run tauri build -- --no-bundle
       - run: copy src-tauri\target\release\wclip.exe WClip-windows-x64.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: windows, path: WClip-windows-x64.exe }
 
   release:
@@ -52,7 +52,7 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { merge-multiple: true }
       # The in-app updater verifies downloads against this file.
       - run: sha256sum WClip-* > SHA256SUMS
