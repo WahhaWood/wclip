@@ -1,6 +1,6 @@
 [package]
 name = "wclip"
-version = "0.3.1"
+version = "0.4.0"
 description = "Cut Twitch VODs into clips with the chat burned in"
 authors = ["WahhaWood"]
 license = "MIT"
