@@ -6,7 +6,7 @@
   import { explain } from "$lib/errors";
   import { copyLayout } from "$lib/layouts";
   import { app, discardSession, newRow, rememberVod, resumeSession, runJob, type Row } from "$lib/state.svelte";
-  import { formatClock, formatTime, parseClock, parseIntervalList, parseTime } from "$lib/time";
+  import { formatClock, formatTime, intervalWarning, parseClock, parseIntervalList, parseTime } from "$lib/time";
   import Captions from "./Captions.svelte";
   import Frame from "./Frame.svelte";
   import Moments from "./Moments.svelte";
@@ -372,6 +372,8 @@
           </div>
           {#if c?.error}
             <p class="error row-error">{c.error}</p>
+          {:else if c?.interval && intervalWarning(c.interval.start, c.interval.end)}
+            <p class="dim row-error">{intervalWarning(c.interval.start, c.interval.end)}</p>
           {/if}
           {#if texting === row.id && c?.interval && app.settings?.subtitles}
             <Captions {row} interval={c.interval} />

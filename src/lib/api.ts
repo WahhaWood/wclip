@@ -196,6 +196,7 @@ export const api = {
   jobStart: (job: Job, overlay: OverlayStyle | null, outDir: string | null, nameTemplate: string, options: JobOptions) =>
     invoke<void>("job_start", { job, overlay, outDir, nameTemplate, options }),
   jobCancel: () => invoke<void>("job_cancel"),
+  report: () => invoke<string>("report"),
   errorLog: () => invoke<string | null>("error_log"),
   updateCheck: (force: boolean) => invoke<UpdateInfo | null>("update_check", { force }),
   updateInstall: () => invoke<void>("update_install"),

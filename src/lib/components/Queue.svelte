@@ -3,12 +3,23 @@
   import { api } from "$lib/api";
   import { explain } from "$lib/errors";
   import { app, runJob } from "$lib/state.svelte";
-  import { formatTime } from "$lib/time";
+  import { formatRemaining, formatTime, remainingSeconds } from "$lib/time";
 
   const done = $derived(app.queue.filter((q) => q.status.state === "done").length);
   const lastPath = $derived(
     app.queue.findLast((q) => q.status.state === "done")?.status as { path: string } | undefined,
   );
+
+  const left = $derived.by(() => {
+    if (!app.running) return null;
+    const clips = app.queue.flatMap((q) =>
+      q.status.state === "done" || q.status.state === "failed"
+        ? []
+        : [{ length: q.interval.end - q.interval.start, fraction: q.status.state === "running" ? q.status.fraction : 0, running: q.status.state === "running" }],
+    );
+    const seconds = remainingSeconds(clips, app.speed);
+    return seconds === null ? null : formatRemaining(seconds);
+  });
 
   /** Clips that failed only because the chat did not load. */
   const chatFailed = $derived(
@@ -39,7 +50,7 @@
 <section class="glass card">
   <div class="head">
     <h2>Очередь</h2>
-    <span class="dim">Готово {done} из {app.queue.length}</span>
+    <span class="dim">Готово {done} из {app.queue.length}{left ? ` · осталось ${left}` : ""}</span>
   </div>
 
   <ul>

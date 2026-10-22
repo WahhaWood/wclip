@@ -80,3 +80,33 @@ export function parseIntervalList(text: string): { intervals: IntervalDraft[]; b
   }
   return { intervals, bad };
 }
+
+/** A clip of the job: `length` of video seconds, `fraction` done (0 while waiting). */
+export type Progress = { length: number; fraction: number; running: boolean };
+
+/**
+ * Seconds left, from the `speed` measured while cutting (video seconds per real
+ * second of one clip). Clips cut side by side share the work; `null` until there is a speed.
+ */
+export function remainingSeconds(clips: Progress[], speed: number | null): number | null {
+  if (!speed || speed <= 0) return null;
+  const left = clips.reduce((sum, c) => sum + c.length * (1 - c.fraction), 0);
+  const parallel = Math.max(1, clips.filter((c) => c.running).length);
+  return left / (speed * parallel);
+}
+
+/** "~3 мин", "~1 ч 5 мин"; under a minute is "меньше минуты". */
+export function formatRemaining(seconds: number): string {
+  const min = Math.ceil(seconds / 60);
+  if (seconds < 60) return "меньше минуты";
+  if (min < 60) return `~${min} мин`;
+  return `~${Math.floor(min / 60)} ч ${min % 60} мин`;
+}
+
+/** A valid interval that is probably a slip: under 3 s or over an hour; `null` otherwise. */
+export function intervalWarning(start: number, end: number): string | null {
+  const length = end - start;
+  if (length < 3) return "Меньше 3 секунд: ролик почти пустой";
+  if (length > 3600) return "Длиннее часа: нарезка займёт много времени";
+  return null;
+}

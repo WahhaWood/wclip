@@ -54,6 +54,19 @@ fn append(path: &Path, line: &str) -> std::io::Result<()> {
     file.write_all(line.as_bytes())
 }
 
+/// The last `n` lines of the log, empty if there is none.
+pub fn tail(n: usize) -> String {
+    let Some(path) = path() else { return String::new() };
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+/// `text` without any of the non-empty `secrets` (a Twitch token, say).
+pub fn scrub(text: &str, secrets: &[&str]) -> String {
+    secrets.iter().filter(|s| !s.trim().is_empty()).fold(text.to_owned(), |t, s| t.replace(s.trim(), "…"))
+}
+
 /// `text` with the query string of every URL replaced by `?…`, and on one line.
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -110,6 +123,12 @@ mod tests {
         );
         assert_eq!(redact("https://cdn/x/index-dvr.m3u8 ok"), "https://cdn/x/index-dvr.m3u8 ok");
         assert_eq!(redact("no links"), "no links");
+    }
+
+    #[test]
+    fn scrubs_secrets() {
+        assert_eq!(scrub("a tok123 b tok123", &["tok123"]), "a … b …");
+        assert_eq!(scrub("keep", &["", "  "]), "keep");
     }
 
     #[test]

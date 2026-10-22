@@ -255,6 +255,15 @@
     if (path) await revealItemInDir(path);
   }
 
+  let copied = $state(false);
+
+  /** Puts version, system, tools and the end of the error log on the clipboard. */
+  async function copyReport() {
+    await navigator.clipboard.writeText(await api.report());
+    copied = true;
+    setTimeout(() => (copied = false), 3000);
+  }
+
   async function chooseDir() {
     const dir = await open({ directory: true, defaultPath: s.outDir ?? undefined });
     if (typeof dir === "string") s.outDir = dir;
@@ -568,6 +577,7 @@
       <span>Журнал ошибок</span>
       <div>
         <button class="btn" onclick={showLog}>Показать файл</button>
+        <button class="btn" onclick={copyReport}>{copied ? "Скопировано" : "Скопировать отчёт"}</button>
         <p class="dim hint">
           {logEmpty ? "Ошибок пока не было." : "Приложите его к сообщению об ошибке. Ссылки в нём без токенов."}
         </p>

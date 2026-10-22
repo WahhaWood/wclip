@@ -810,6 +810,22 @@ fn error_log() -> Option<PathBuf> {
     errlog::path().map(PathBuf::from)
 }
 
+/// Version, system, tools, GPUs and the end of the error log as text for a bug report;
+/// the Twitch token is cut out of it.
+#[tauri::command]
+async fn report(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let settings = settings::load(&settings_path(&app)?);
+    let mut out = format!("WClip {}, {} {}\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    let dir = tools_dir(&app)?;
+    for t in tauri::async_runtime::spawn_blocking(move || tools::status(&dir)).await.map_err(|e| e.to_string())? {
+        out += &format!("{}: {}\n", t.tool.name(), t.version.as_deref().unwrap_or("not found"));
+    }
+    out += &format!("speech GPU: {}\n", speech_gpu(&app).await.map_or("none".to_owned(), |g| g.1));
+    out += &format!("encoders: {:?}, picked {:?}\n", state.gpus.lock().await, settings.output.encoder);
+    out += &format!("\n{}\n", errlog::tail(40));
+    Ok(errlog::scrub(&out, &[settings.twitch_token.as_deref().unwrap_or("")]))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -844,6 +860,7 @@ pub fn run() {
             job_start,
             job_cancel,
             error_log,
+            report,
             update_check,
             update_install,
             update_restart,

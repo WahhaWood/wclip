@@ -1,7 +1,7 @@
 // Run with `npm test` (node's built-in runner; node strips the types itself).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatClock, formatTime, parseClock, parseIntervalList, parseTime } from "./time.ts";
+import { formatClock, formatRemaining, formatTime, intervalWarning, parseClock, parseIntervalList, parseTime, remainingSeconds } from "./time.ts";
 
 test("parseTime accepts clock and unit forms", () => {
   assert.equal(parseTime("1:02:03"), 3723);
@@ -60,4 +60,28 @@ test("clock times round-trip and take the date from near", () => {
   for (const bad of ["", "20:00", "25:00:00", "2026-02-30 10:00:00", "2026-10-19"]) {
     assert.equal(parseClock(bad, t), null, bad);
   }
+});
+
+test("remainingSeconds shares the speed between parallel clips", () => {
+  const clips = [
+    { length: 60, fraction: 0.5, running: true },
+    { length: 60, fraction: 0, running: false },
+  ];
+  assert.equal(remainingSeconds(clips, null), null);
+  assert.equal(remainingSeconds(clips, 3), 30);
+  clips[1].running = true;
+  assert.equal(remainingSeconds(clips, 3), 15);
+});
+
+test("formatRemaining", () => {
+  assert.equal(formatRemaining(20), "меньше минуты");
+  assert.equal(formatRemaining(61), "~2 мин");
+  assert.equal(formatRemaining(3900), "~1 ч 5 мин");
+});
+
+test("intervalWarning", () => {
+  assert.ok(intervalWarning(10, 12));
+  assert.equal(intervalWarning(10, 13), null);
+  assert.equal(intervalWarning(0, 3600), null);
+  assert.ok(intervalWarning(0, 3601));
 });

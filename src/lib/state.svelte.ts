@@ -54,6 +54,8 @@ export type UpdateState =
   | { state: "failed"; error: unknown };
 
 let nextRow = 1;
+/** When each queue item started cutting (ms), to measure `app.speed`. */
+const cutStarted = new Map<number, number>();
 
 export const app = $state({
   screen: "home" as Screen,
@@ -77,6 +79,8 @@ export const app = $state({
   /** Queue index of each interval of the running job, by its index in the job. */
   jobItems: [] as number[],
   running: false,
+  /** Video seconds cut per real second by one clip, measured while the job runs; `null` before a clip has run a while. */
+  speed: null as number | null,
   /** Release shown in the update banner; `null` hides it. */
   update: null as UpdateInfo | null,
   updateState: { state: "found" } as UpdateState,
@@ -186,6 +190,8 @@ export async function runJob(items: number[], overlay: OverlayStyle | null, merg
     notify: s.notify,
   };
   for (const i of items) app.queue[i].status = { state: "waiting" };
+  cutStarted.clear();
+  app.speed = null;
   app.jobItems = items;
   await api.jobStart(job, overlay, s.outDir, s.nameTemplate, options);
   app.running = true;
@@ -200,6 +206,15 @@ export async function initApp() {
     if (!item) return;
     const { index: _, ...status } = e;
     item.status = status;
+    if (status.state === "running") {
+      const at = app.jobItems[e.index];
+      const started = cutStarted.get(at) ?? (cutStarted.set(at, Date.now()), Date.now());
+      const elapsed = (Date.now() - started) / 1000;
+      // Too early the number jumps about.
+      if (elapsed >= 3 && status.fraction > 0.02) {
+        app.speed = ((item.interval.end - item.interval.start) * status.fraction) / elapsed;
+      }
+    }
   });
   await listen<MergeEvent>("merge", ({ payload }) => {
     app.merge = payload;
