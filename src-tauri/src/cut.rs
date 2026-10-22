@@ -70,6 +70,23 @@ struct YtDlpInfo {
     url: String,
     thumbnail: Option<String>,
     height: Option<u32>,
+    #[serde(default)]
+    formats: Vec<YtDlpFormat>,
+}
+
+#[derive(Deserialize)]
+struct YtDlpFormat {
+    url: String,
+    vcodec: Option<String>,
+    acodec: Option<String>,
+}
+
+impl YtDlpInfo {
+    /// Twitch's "Audio_Only" rendition.
+    fn audio(&self) -> Option<String> {
+        let none = |codec: &Option<String>| codec.as_deref().is_none_or(|c| c == "none");
+        self.formats.iter().find(|f| none(&f.vcodec) && !none(&f.acodec)).map(|f| f.url.clone())
+    }
 }
 
 /// A subscriber-only VOD is asked for again with `token`, the `auth-token` cookie
@@ -96,6 +113,7 @@ async fn yt_dlp_info(tools: &Tools, id: &str, token: Option<&str>) -> Result<Vod
         return Err(tool_error(&out.stderr, "yt-dlp"));
     }
     let info: YtDlpInfo = serde_json::from_slice(&out.stdout)?;
+    let audio = info.audio();
     Ok(Vod {
         id: id.to_owned(),
         title: info.title,
@@ -104,6 +122,7 @@ async fn yt_dlp_info(tools: &Tools, id: &str, token: Option<&str>) -> Result<Vod
         thumbnail: info.thumbnail,
         playlist: info.url,
         height: info.height,
+        audio,
         local: false,
         started: None,
     })
@@ -180,6 +199,7 @@ pub async fn local_info(tools: &Tools, path: &Path) -> Result<Vod> {
         thumbnail: None,
         playlist: path.to_string_lossy().into_owned(),
         height,
+        audio: None,
         local: true,
     })
 }
@@ -687,6 +707,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn audio_only_format() {
+        let json = r#"{"title": "t", "duration": 1, "url": "video", "formats": [
+            {"url": "sb", "vcodec": "none", "acodec": "none"},
+            {"url": "audio", "vcodec": "none", "acodec": "mp4a.40.2"},
+            {"url": "video", "vcodec": "avc1.64002A", "acodec": "mp4a.40.2"}]}"#;
+        let info: YtDlpInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.audio().as_deref(), Some("audio"));
+        let bare: YtDlpInfo = serde_json::from_str(r#"{"title": "t", "duration": 1, "url": "video"}"#).unwrap();
+        assert_eq!(bare.audio(), None);
+    }
+
+    /// The audio-only rendition sounds the same as the video's audio at the same
+    /// VOD time: `cargo test -- --ignored smoke_audio_only --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn smoke_audio_only() {
+        let tools = Tools::from_status(&tools::status(&std::env::temp_dir())).expect("tools in PATH");
+        let vod = vod_info(&tools, "2905205256", None).await.unwrap();
+        let only = vod.audio.clone().expect("an audio-only playlist");
+        let started = std::time::Instant::now();
+        let a = audio(&tools, &vod.playlist, 600.0, 20.0).await.unwrap();
+        let from_video = started.elapsed();
+        let started = std::time::Instant::now();
+        let b = audio(&tools, &only, 600.0, 20.0).await.unwrap();
+        println!("20 s of audio: {from_video:.1?} from the video, {:.1?} audio-only", started.elapsed());
+        assert!(a.len().abs_diff(b.len()) < 1600, "{} vs {} samples", a.len(), b.len());
+        // Loudness per 10 ms; the best lag must be about zero.
+        let envelope = |s: &[f32]| s.chunks(160).map(|c| c.iter().map(|x| x * x).sum::<f32>().sqrt()).collect::<Vec<_>>();
+        let (ea, eb) = (envelope(&a), envelope(&b));
+        let n = ea.len().min(eb.len()) - 20;
+        let corr = |lag: usize| {
+            let (x, y) = (&ea[10..10 + n], &eb[lag..lag + n]);
+            let dot: f32 = x.iter().zip(y).map(|(p, q)| p * q).sum();
+            dot / (x.iter().map(|p| p * p).sum::<f32>().sqrt() * y.iter().map(|q| q * q).sum::<f32>().sqrt())
+        };
+        let (lag, best) = (0..20).map(|l| (l, corr(l))).max_by(|p, q| p.1.total_cmp(&q.1)).unwrap();
+        println!("best lag {} ms, correlation {best:.3}", (lag as i32 - 10) * 10);
+        assert!(best > 0.95 && (lag as i32 - 10).abs() <= 2, "lag {lag}, correlation {best}");
+    }
+
     /// Dropping `cut` mid-way must kill ffmpeg and leave no partial file.
     #[cfg(unix)]
     #[tokio::test]
@@ -834,6 +895,7 @@ mod tests {
             thumbnail: None,
             playlist: String::new(),
             height: Some(720),
+            audio: None,
             local: true,
             started: None,
         };
@@ -916,9 +978,10 @@ mod tests {
         let tools = Tools::from_status(&tools::status(&dir)).expect("tools in PATH");
         let vod = vod_info(&tools, "2903333502", None).await.unwrap();
         let interval = Interval { start: 3600.0, end: 3620.0, name: String::new() };
-        let samples = audio(&tools, &vod.playlist, interval.start, 20.0).await.unwrap();
+        let samples = audio(&tools, vod.audio_input(), interval.start, 20.0).await.unwrap();
         let words = tokio::task::spawn_blocking(move || {
-            crate::speech::transcribe(&model, &samples, Some("ru"), |_| {}, Arc::new(AtomicBool::new(false)))
+            let gpu = crate::speech::gpu().map(|g| g.0);
+            crate::speech::transcribe(&model, &samples, Some("ru"), gpu, |_| {}, Arc::new(AtomicBool::new(false)))
         })
         .await
         .unwrap()

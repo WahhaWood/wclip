@@ -4,6 +4,7 @@
 //! The model comes from the whisper.cpp repository on Hugging Face, pinned to a
 //! commit and checked by SHA-256.
 
+use std::ffi::CStr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -33,16 +34,41 @@ pub struct Word {
     pub text: String,
 }
 
-/// Words of 16 kHz mono `samples`. `language` is a code like "ru"; `None` detects
-/// it. `on_progress` gets percents; setting `cancel` stops early with an error.
+/// A discrete GPU whisper can run on (Vulkan): its number for `transcribe` and its
+/// name. Integrated GPUs are left out, they are hardly faster than the CPU
+/// (hypothesis). Asks Vulkan for its devices, so call it off the main thread.
+pub fn gpu() -> Option<(i32, String)> {
+    use whisper_rs_sys as sys;
+    // whisper numbers integrated and discrete GPUs together.
+    let mut n = 0;
+    for i in 0..unsafe { sys::ggml_backend_dev_count() } {
+        let device = unsafe { sys::ggml_backend_dev_get(i) };
+        match unsafe { sys::ggml_backend_dev_type(device) } {
+            sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU => {
+                let name = unsafe { CStr::from_ptr(sys::ggml_backend_dev_description(device)) };
+                return Some((n, name.to_string_lossy().into_owned()));
+            }
+            sys::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU => n += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Words of 16 kHz mono `samples`, on GPU number `gpu` (see `gpu`) or the CPU.
+/// `language` is a code like "ru"; `None` detects it. `on_progress` gets percents;
+/// setting `cancel` stops early with an error.
 pub fn transcribe(
     path: &Path,
     samples: &[f32],
     language: Option<&str>,
+    gpu: Option<i32>,
     on_progress: impl FnMut(i32) + 'static,
     cancel: Arc<AtomicBool>,
 ) -> Result<Vec<Word>, String> {
     let mut context_params = WhisperContextParameters::default();
+    context_params.use_gpu(gpu.is_some()).gpu_device(gpu.unwrap_or(0));
+    // Not flash attention: whisper turns DTW off with it.
     context_params.dtw_parameters(DtwParameters { mode: DtwMode::ModelPreset { model_preset: DtwModelPreset::LargeV3Turbo }, ..Default::default() });
     let path = path.to_str().ok_or("model path is not UTF-8")?;
     let context = WhisperContext::new_with_params(path, context_params).map_err(|e| e.to_string())?;
@@ -112,7 +138,9 @@ fn words(tokens: &[Token]) -> Vec<Word> {
 /// suggests, so a word before a pause does not hang on.
 fn spoken_end(start: f64, next: Option<f64>, chars: usize) -> f64 {
     let guess = start + (0.2 + 0.07 * chars as f64).min(1.2);
-    next.map_or(guess, |n| n.min(guess)).max(start + 0.05)
+    let next = next.unwrap_or(f64::INFINITY);
+    // At least 50 ms, unless the next word starts sooner.
+    guess.min(next).max((start + 0.05).min(next))
 }
 
 #[cfg(test)]
@@ -145,8 +173,17 @@ mod tests {
         assert!((words[2].end - (4.0 + 0.2 + 0.07 * 5.0)).abs() < 1e-9);
     }
 
-    /// Words of a minute of a VOD; prints them with times and the speed:
-    /// `WCLIP_MODEL=<file> [WCLIP_VOD=<id>] [WCLIP_AT=<s>] [WCLIP_LANG=ru]
+    #[test]
+    fn word_ends_before_the_next() {
+        // "я" at 28.18 and the next word 40 ms later (seen on a real VOD).
+        assert_eq!(spoken_end(28.18, Some(28.22), 1), 28.22);
+        assert!((spoken_end(1.0, Some(1.0), 1) - 1.0).abs() < 1e-9);
+        assert!((spoken_end(1.0, None, 0) - 1.2).abs() < 1e-9);
+    }
+
+    /// Words of a minute of a VOD; prints them with times and the speed, on the GPU
+    /// if there is one (`WCLIP_CPU=1`: on the CPU):
+    /// `WCLIP_MODEL=<file> [WCLIP_VOD=<id>] [WCLIP_AT=<s>] [WCLIP_LANG=ru] [WCLIP_CPU=1]
     /// cargo test --release -- --ignored smoke_transcribe --nocapture`.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore]
@@ -158,12 +195,14 @@ mod tests {
         let at: f64 = var("WCLIP_AT").map_or(600.0, |v| v.parse().unwrap());
         let tools = Tools::from_status(&tools::status(&std::env::temp_dir())).expect("tools in PATH");
         let vod = crate::cut::vod_info(&tools, &vod_id, None).await.unwrap();
-        let samples = crate::cut::audio(&tools, &vod.playlist, at, 60.0).await.unwrap();
+        let samples = crate::cut::audio(&tools, vod.audio_input(), at, 60.0).await.unwrap();
         assert!((samples.len() as f64 / 16000.0 - 60.0).abs() < 0.5, "{} samples", samples.len());
+        let gpu = if var("WCLIP_CPU").is_some() { None } else { gpu() };
+        println!("on {}", gpu.as_ref().map_or("the CPU", |g| &g.1));
         let started = std::time::Instant::now();
         let lang = var("WCLIP_LANG");
         let words = tokio::task::spawn_blocking(move || {
-            transcribe(&path, &samples, lang.as_deref(), |_| {}, Arc::new(AtomicBool::new(false)))
+            transcribe(&path, &samples, lang.as_deref(), gpu.map(|g| g.0), |_| {}, Arc::new(AtomicBool::new(false)))
         })
         .await
         .unwrap()

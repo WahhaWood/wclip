@@ -13,6 +13,8 @@ export type Vod = {
   thumbnail: string | null;
   playlist: string;
   height: number | null;
+  /** Audio-only HLS playlist, for speech recognition. */
+  audio: string | null;
   /** A file on disk: `playlist` is its path, the chat comes from a chat log. */
   local: boolean;
   /** Naive local time (seconds) the file starts at, from its name. */
@@ -135,6 +137,8 @@ export type Settings = {
   subtitleStyle: SubtitleStyle;
   /** Like "ru"; `null` detects the language. */
   speechLanguage: string | null;
+  /** Recognise the speech on the GPU when there is one. */
+  speechGpu: boolean;
 };
 
 /** A release newer than the running app; `installable` false means linking to `page`. */
@@ -181,7 +185,9 @@ export const api = {
   speechModelReady: () => invoke<boolean>("speech_model_ready"),
   /** Downloads the speech model (~900 MB); reports `model-progress` ({ done, total }). */
   speechModelInstall: () => invoke<void>("speech_model_install"),
+  /** GPU the speech is recognised on; `null`: the CPU. */
+  speechDevice: () => invoke<string | null>("speech_device"),
   /** Captions of `start..end` for editing; reports `transcribe-progress` (percent). A newer call cancels this one. */
-  transcribe: (vod: Vod, start: number, end: number, language: string | null, words: number) =>
-    invoke<Caption[]>("transcribe", { vod, start, end, language, words }),
+  transcribe: (vod: Vod, start: number, end: number, language: string | null, gpu: boolean, words: number) =>
+    invoke<Caption[]>("transcribe", { vod, start, end, language, gpu, words }),
 };

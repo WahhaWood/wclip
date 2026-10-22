@@ -33,6 +33,7 @@
         interval.start,
         interval.end,
         s.speechLanguage,
+        s.speechGpu,
         s.subtitleStyle.words,
       );
       row.captions = captions;

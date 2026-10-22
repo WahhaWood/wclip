@@ -74,9 +74,12 @@ impl Output {
         let hevc = self.codec == Codec::Hevc;
         let pick = |h264: &'static str, h265: &'static str| if hevc { h265 } else { h264 };
         // Encoder, its options, the flags taking the quality and the quality per
-        // level (CRF, CQ or QP: lower is better).
+        // level (CRF, CQ or QP: lower is better). A level means the same picture on
+        // every encoder: VMAF against the Twitch source as x264's (95 / 93 / 89),
+        // measured 2026-10-21 on four 1080p60 VOD moments (Plan.md, stage 18).
+        // NVENC, QSV and AMF are not measured: their levels are from the docs.
         let (name, options, quality_flags, levels): (&str, &[&str], &[&str], [u8; 3]) = match self.encoder {
-            Encoder::Auto | Encoder::Cpu if hevc => ("libx265", &["-preset", "fast"], &["-crf"], [20, 24, 28]),
+            Encoder::Auto | Encoder::Cpu if hevc => ("libx265", &["-preset", "fast"], &["-crf"], [22, 26, 30]),
             Encoder::Auto | Encoder::Cpu => ("libx264", &["-preset", "veryfast"], &["-crf"], [18, 22, 26]),
             Encoder::Nvenc => (
                 pick("h264_nvenc", "hevc_nvenc"),
@@ -88,7 +91,10 @@ impl Output {
             Encoder::Amf => {
                 (pick("h264_amf", "hevc_amf"), &["-quality", "balanced", "-rc", "cqp"], &["-qp_i", "-qp_p"], [20, 24, 28])
             }
-            Encoder::Vaapi => (pick("h264_vaapi", "hevc_vaapi"), &["-rc_mode", "CQP"], &["-qp"], [20, 24, 28]),
+            // Constant QP without a bitrate cap: QP 20 made busy scenes 2.6 times the
+            // source bitrate. Mesa has no QVBR, and VBR at the source bitrate looks
+            // worse (VMAF 90).
+            Encoder::Vaapi => (pick("h264_vaapi", "hevc_vaapi"), &["-rc_mode", "CQP"], &["-qp"], [24, 28, 32]),
         };
         let level = match self.quality {
             Quality::High => levels[0],
@@ -191,6 +197,59 @@ mod tests {
         assert_eq!(v.global[0], "-vaapi_device");
         assert_eq!(v.filter, "format=nv12,hwupload");
         assert_eq!(v.codec[1], "h264_vaapi");
+        assert!(v.codec.windows(2).any(|w| w == ["-qp", "24"]), "{:?}", v.codec);
+    }
+
+    /// "High" on every working encoder looks like x264's, VMAF against 10 s of a busy
+    /// VOD scene (where an uncapped encoder overshoots most); ffmpeg with libvmaf
+    /// and yt-dlp from `PATH`: `cargo test -- --ignored smoke_quality --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn smoke_quality() {
+        let tools = Tools::from_status(&tools::status(&std::env::temp_dir())).expect("tools in PATH");
+        let dir = std::env::temp_dir().join(format!("wclip-test-quality-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vod = crate::cut::vod_info(&tools, "2905205256", None).await.unwrap();
+        let source = dir.join("source.mp4");
+        let ffmpeg = || std::process::Command::new(&tools.ffmpeg);
+        let ok = ffmpeg()
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", "20000", "-i", &vod.playlist, "-t", "10", "-an", "-c", "copy"])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        for codec in [Codec::H264, Codec::Hevc] {
+            for encoder in std::iter::once(Encoder::Cpu).chain(available(&tools, codec).await) {
+                let args = Output { encoder, codec, quality: Quality::High }.args();
+                let out = dir.join(format!("{encoder:?}_{codec:?}.mp4"));
+                let ok = ffmpeg()
+                    .args(["-hide_banner", "-loglevel", "error", "-y"])
+                    .args(&args.global)
+                    .arg("-i")
+                    .arg(&source)
+                    .args(["-vf", &args.filter])
+                    .args(&args.codec)
+                    .arg(&out)
+                    .status()
+                    .unwrap();
+                assert!(ok.success());
+                let vmaf = ffmpeg()
+                    .args(["-hide_banner", "-i"])
+                    .arg(&out)
+                    .arg("-i")
+                    .arg(&source)
+                    .args(["-lavfi", "[0:v]setpts=PTS-STARTPTS[d];[1:v]setpts=PTS-STARTPTS[r];[d][r]libvmaf=n_subsample=3"])
+                    .args(["-f", "null", "-"])
+                    .output()
+                    .unwrap();
+                let log = String::from_utf8_lossy(&vmaf.stderr);
+                let score: f64 = log.split("VMAF score: ").nth(1).and_then(|s| s.split_whitespace().next()).unwrap().parse().unwrap();
+                let size = std::fs::metadata(&out).unwrap().len() as f64 * 8.0 / 10.0 / 1e6;
+                println!("{encoder:?} {codec:?}: VMAF {score:.1}, {size:.1} Mbit/s");
+                assert!((94.3..=96.3).contains(&score), "{encoder:?} {codec:?}: VMAF {score:.1}");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

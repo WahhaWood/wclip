@@ -487,12 +487,17 @@
         <span class="dim hint inline">H.265 меньше по размеру, H.264 открывается везде.</span>
       </div>
       <span>Качество</span>
-      <div class="line">
-        {#each QUALITIES as [q, label] (q)}
-          <button class="btn" class:selected={s.output.quality === q} onclick={() => (s.output.quality = q)}>
-            {label}
-          </button>
-        {/each}
+      <div>
+        <div class="line">
+          {#each QUALITIES as [q, label] (q)}
+            <button class="btn" class:selected={s.output.quality === q} onclick={() => (s.output.quality = q)}>
+              {label}
+            </button>
+          {/each}
+        </div>
+        <p class="dim hint">
+          Высокое на глаз не отличить от записи Twitch, Компактное примерно втрое меньше по размеру.
+        </p>
       </div>
       <span>Чат</span>
       <div>

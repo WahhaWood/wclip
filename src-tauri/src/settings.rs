@@ -46,6 +46,8 @@ pub struct Settings {
     pub subtitle_style: SubtitleStyle,
     /// Language of the speech, like "ru"; `None` detects it.
     pub speech_language: Option<String>,
+    /// Recognise the speech on the GPU when there is one.
+    pub speech_gpu: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +78,7 @@ impl Default for Settings {
             subtitles: false,
             subtitle_style: SubtitleStyle::default(),
             speech_language: None,
+            speech_gpu: true,
         }
     }
 }

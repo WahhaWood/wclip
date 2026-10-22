@@ -27,9 +27,12 @@
   /** Bytes done and total of the model download; `null` when not downloading. */
   let progress = $state<{ done: number; total: number | null } | null>(null);
   let error = $state<ReturnType<typeof explain> | null>(null);
+  /** GPU for the speech; `null`: none, `undefined`: still looking. */
+  let device = $state<string | null | undefined>(undefined);
 
   onMount(() => {
     if (app.speechModel === null) api.speechModelReady().then((ready) => (app.speechModel = ready), console.error);
+    api.speechDevice().then((d) => (device = d), console.error);
     const unlisten = listen<{ done: number; total: number | null }>("model-progress", (e) => (progress = e.payload));
     return () => unlisten.then((f) => f());
   });
@@ -77,9 +80,22 @@
       {/if}
       <p class="dim hint">
         Whisper large-v3-turbo работает на этом компьютере, без интернета. Минута речи распознаётся примерно за минуту на
-        процессоре. Ошибки в именах и сленге можно поправить у интервала (кнопка «Текст»).
+        процессоре и в несколько раз быстрее на видеокарте. Ошибки в именах и сленге можно поправить у интервала (кнопка
+        «Текст»).
       </p>
     </div>
+
+    <span>Видеокарта</span>
+    {#if device === undefined}
+      <p class="state dim">Ищем видеокарту…</p>
+    {:else if device}
+      <label class="line state">
+        <input type="checkbox" bind:checked={s.speechGpu} />
+        Распознавать на видеокарте ({device})
+      </label>
+    {:else}
+      <p class="state dim">Подходящей видеокарты нет, распознаём на процессоре.</p>
+    {/if}
 
     <span>Язык речи</span>
     <select class="field" bind:value={s.speechLanguage}>

@@ -17,6 +17,10 @@ pub struct Vod {
     pub playlist: String,
     /// Video height of that playlist, pixels.
     pub height: Option<u32>,
+    /// HLS playlist of the audio alone, when Twitch has one: speech recognition
+    /// reads ~35 times less from it than from `playlist`.
+    #[serde(default)]
+    pub audio: Option<String>,
     /// A video file on disk rather than a Twitch VOD: `playlist` is its path, `id`
     /// its name, and the chat comes from `Job::chat_log`.
     #[serde(default)]
@@ -25,6 +29,13 @@ pub struct Vod {
     /// `chat::log::started_from_name`).
     #[serde(default)]
     pub started: Option<f64>,
+}
+
+impl Vod {
+    /// Input to take the sound from.
+    pub fn audio_input(&self) -> &str {
+        self.audio.as_deref().unwrap_or(&self.playlist)
+    }
 }
 
 /// Chat log for a local video.
@@ -96,14 +107,15 @@ pub const DEFAULT_TEMPLATE: &str = "{channel}_{vod}_{start}";
 
 /// Free output path for clip number `n` (from 1): the interval name, or `template`
 /// with `{channel}`, `{vod}`, `{start}`, `{end}` (`HH-MM-SS`) and `{n}` filled in;
-/// ` (2)`, ` (3)`… is appended if the file exists.
-pub fn clip_path(dir: &Path, template: &str, vod: &Vod, interval: &Interval, n: usize) -> PathBuf {
+/// ` (2)`, ` (3)`… is appended if the file exists or is in `taken` (clips still
+/// being cut).
+pub fn clip_path(dir: &Path, template: &str, vod: &Vod, interval: &Interval, n: usize, taken: &[PathBuf]) -> PathBuf {
     let base = if interval.name.trim().is_empty() {
         fill_template(template, vod, interval, &n.to_string())
     } else {
         interval.name.trim().to_owned()
     };
-    free_path(dir, &base)
+    free_path(dir, &base, taken)
 }
 
 /// Free output path for all clips of a job joined: `template` over the span of
@@ -112,7 +124,7 @@ pub fn merged_path(dir: &Path, template: &str, vod: &Vod, intervals: &[Interval]
     let start = intervals.iter().map(|i| i.start).fold(f64::INFINITY, f64::min);
     let end = intervals.iter().map(|i| i.end).fold(0.0, f64::max);
     let span = Interval { start, end, name: String::new() };
-    free_path(dir, &format!("{}_merged", fill_template(template, vod, &span, "all")))
+    free_path(dir, &format!("{}_merged", fill_template(template, vod, &span, "all")), &[])
 }
 
 fn fill_template(template: &str, vod: &Vod, interval: &Interval, n: &str) -> String {
@@ -133,8 +145,8 @@ fn fill_template(template: &str, vod: &Vod, interval: &Interval, n: &str) -> Str
 }
 
 /// `<dir>/<base>.mp4` with characters no file system takes replaced, and ` (2)`,
-/// ` (3)`… appended while the file exists.
-fn free_path(dir: &Path, base: &str) -> PathBuf {
+/// ` (3)`… appended while the file exists or is `taken`.
+fn free_path(dir: &Path, base: &str, taken: &[PathBuf]) -> PathBuf {
     let base: String = base
         .chars()
         .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
@@ -145,7 +157,7 @@ fn free_path(dir: &Path, base: &str) -> PathBuf {
             1 => dir.join(format!("{base}.mp4")),
             k => dir.join(format!("{base} ({k}).mp4")),
         })
-        .find(|p| !p.exists())
+        .find(|p| !p.exists() && !taken.contains(p))
         .expect("unbounded")
 }
 
@@ -215,6 +227,7 @@ mod tests {
                 thumbnail: None,
                 playlist: String::new(),
                 height: None,
+                audio: None,
                 local: false,
                 started: None,
             },
@@ -235,16 +248,18 @@ mod tests {
         let mut job = job(&[(3725.0, 3800.0)]);
         job.vod.channel = "chan".into();
         let iv = &mut job.intervals[0];
-        assert_eq!(clip_path(&dir, "", &job.vod, iv, 1), dir.join("chan_1_01-02-05.mp4"));
+        assert_eq!(clip_path(&dir, "", &job.vod, iv, 1, &[]), dir.join("chan_1_01-02-05.mp4"));
         let local = Vod { channel: String::new(), id: "Replay 1".into(), ..job.vod.clone() };
-        assert_eq!(clip_path(&dir, "", &local, iv, 1), dir.join("Replay 1_01-02-05.mp4"));
+        assert_eq!(clip_path(&dir, "", &local, iv, 1, &[]), dir.join("Replay 1_01-02-05.mp4"));
         let custom = "{n}. {channel} {start}-{end}";
-        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 3), dir.join("3. chan 01-02-05-01-03-20.mp4"));
+        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 3, &[]), dir.join("3. chan 01-02-05-01-03-20.mp4"));
 
         iv.name = " a/b: c? ".into();
-        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1), dir.join("a_b_ c_.mp4"));
+        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1, &[]), dir.join("a_b_ c_.mp4"));
         std::fs::write(dir.join("a_b_ c_.mp4"), b"").unwrap();
-        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1), dir.join("a_b_ c_ (2).mp4"));
+        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1, &[]), dir.join("a_b_ c_ (2).mp4"));
+        // A clip still being cut has no file yet.
+        assert_eq!(clip_path(&dir, custom, &job.vod, iv, 1, &[dir.join("a_b_ c_ (2).mp4")]), dir.join("a_b_ c_ (3).mp4"));
 
         let ivs = [Interval { start: 70.0, end: 80.0, name: "x".into() }, Interval { start: 10.0, end: 20.0, name: String::new() }];
         assert_eq!(merged_path(&dir, "", &job.vod, &ivs), dir.join("chan_1_00-00-10_merged.mp4"));

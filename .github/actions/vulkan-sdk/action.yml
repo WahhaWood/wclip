@@ -1,0 +1,34 @@
+name: Vulkan SDK
+description: Headers, loader and glslc for whisper.cpp's Vulkan backend; sets VULKAN_SDK.
+runs:
+  using: composite
+  steps:
+    - if: runner.os == 'Linux'
+      uses: actions/cache@v5
+      with:
+        path: ~/vulkan-sdk
+        key: vulkan-sdk-linux-1.4.363.0
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        if [ ! -d ~/vulkan-sdk/x86_64 ]; then
+          mkdir -p ~/vulkan-sdk
+          curl -fsSL https://sdk.lunarg.com/sdk/download/1.4.363.0/linux/vulkansdk-linux-x86_64-1.4.363.0.tar.xz \
+            | tar -xJ -C ~/vulkan-sdk --strip-components=1 1.4.363.0/x86_64
+        fi
+        echo "VULKAN_SDK=$HOME/vulkan-sdk/x86_64" >> "$GITHUB_ENV"
+        echo "$HOME/vulkan-sdk/x86_64/bin" >> "$GITHUB_PATH"
+    - if: runner.os == 'Windows'
+      uses: actions/cache@v5
+      with:
+        path: C:\VulkanSDK
+        key: vulkan-sdk-windows-1.4.363.0
+    - if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (-not (Test-Path C:\VulkanSDK\1.4.363.0)) {
+          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/vulkansdk-windows-X64-1.4.363.0.exe -OutFile $env:RUNNER_TEMP\vulkan.exe
+          & $env:RUNNER_TEMP\vulkan.exe --accept-licenses --default-answer --confirm-command install com.lunarg.vulkan.core
+        }
+        "VULKAN_SDK=C:\VulkanSDK\1.4.363.0" >> $env:GITHUB_ENV
+        "C:\VulkanSDK\1.4.363.0\Bin" >> $env:GITHUB_PATH

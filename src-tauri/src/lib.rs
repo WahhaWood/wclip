@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use failure::{Failure, Kind};
+use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime::JoinHandle;
 use tauri::ipc::Response;
@@ -66,6 +67,8 @@ struct AppState {
     words: Mutex<HashMap<String, Arc<Vec<speech::Word>>>>,
     /// Stops the `transcribe` in progress; a newer one sets it.
     transcribing: Mutex<Option<Arc<AtomicBool>>>,
+    /// GPU for speech recognition, looked for once per run (see `speech_gpu`).
+    speech_gpu: tokio::sync::OnceCell<Option<(i32, String)>>,
 }
 
 /// Payload of `clip` events: one per state change or progress tick of a clip.
@@ -108,6 +111,8 @@ struct JobOptions {
     subtitles: Option<subtitles::SubtitleStyle>,
     /// Language of the speech; `None` detects it.
     language: Option<String>,
+    /// Recognise the speech on the GPU when there is one.
+    speech_gpu: bool,
 }
 
 /// Chat of a whole video: for finding moments, and cut from without loading again.
@@ -146,6 +151,7 @@ async fn clip_subtitles(
     index: usize,
     style: &subtitles::SubtitleStyle,
     language: Option<String>,
+    gpu: bool,
     layout: Option<&layout::Layout>,
     dir: &std::path::Path,
 ) -> Result<PathBuf, Failure> {
@@ -159,7 +165,7 @@ async fn clip_subtitles(
                 let _ = progress_app.emit("clip", ClipEvent::Transcribing { index, fraction: f64::from(p) / 100.0 });
             };
             let span = (interval.start, interval.end);
-            let words = spoken_words(app, tools, &job.vod, span, language, guard.0.clone(), progress).await?;
+            let words = spoken_words(app, tools, &job.vod, span, language, gpu, guard.0.clone(), progress).await?;
             subtitles::captions(&words, style.words)
         }
     };
@@ -188,16 +194,19 @@ fn model_ready(app: &AppHandle) -> bool {
     model_path(app).is_ok_and(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == speech::MODEL_SIZE))
 }
 
-/// Words of `start..end` of `vod`: remembered, or transcribed now (whisper on the
-/// CPU, about real time).
+/// Words of `start..end` of `vod`: remembered, or transcribed now, on a discrete
+/// GPU if `gpu` and there is one (the CPU takes about real time). A failure on the
+/// GPU (driver, video memory) is tried again on the CPU.
+#[allow(clippy::too_many_arguments)]
 async fn spoken_words(
     app: &AppHandle,
     tools: &tools::Tools,
     vod: &job::Vod,
     (start, end): (f64, f64),
     language: Option<String>,
+    gpu: bool,
     cancel: Arc<AtomicBool>,
-    on_progress: impl FnMut(i32) + Send + 'static,
+    on_progress: impl FnMut(i32) + Clone + Send + 'static,
 ) -> Result<Arc<Vec<speech::Word>>, Failure> {
     // A VOD playlist URL carries an expiring token; the id does not change.
     let video = if vod.local { &vod.playlist } else { &vod.id };
@@ -210,12 +219,22 @@ async fn spoken_words(
         return Err(Failure::new(Kind::NoModel, "the speech model is not downloaded"));
     }
     let model = model_path(app)?;
-    let samples = cut::audio(tools, &vod.playlist, start, end - start).await.map_err(|e| Failure::new(e.kind(), e))?;
-    let words = tauri::async_runtime::spawn_blocking(move || {
-        speech::transcribe(&model, &samples, language.as_deref(), on_progress, cancel)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let samples = Arc::new(cut::audio(tools, vod.audio_input(), start, end - start).await.map_err(|e| Failure::new(e.kind(), e))?);
+    let device = if gpu { speech_gpu(app).await } else { None };
+    let run = |device: Option<i32>| {
+        let (model, samples, language, on_progress, cancel) =
+            (model.clone(), samples.clone(), language.clone(), on_progress.clone(), cancel.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            speech::transcribe(&model, &samples, language.as_deref(), device, on_progress, cancel)
+        })
+    };
+    let words = match run(device.as_ref().map(|d| d.0)).await.map_err(|e| e.to_string())? {
+        Err(e) if device.is_some() && !cancel.load(Ordering::Relaxed) => {
+            errlog::write("speech on the GPU, now on the CPU", &e);
+            run(None).await.map_err(|e| e.to_string())?
+        }
+        words => words,
+    }?;
     let words = Arc::new(words);
     let mut cache = state.words.lock().unwrap();
     if cache.len() >= WORDS_KEPT {
@@ -253,6 +272,7 @@ async fn speech_model_install(app: AppHandle) -> Result<(), Failure> {
 /// Captions of `start..end` of `vod` for editing, `words` at most in each,
 /// reporting `transcribe-progress` (percent). A newer call stops this one.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // the arguments are the fields the frontend passes
 async fn transcribe(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -260,6 +280,7 @@ async fn transcribe(
     start: f64,
     end: f64,
     language: Option<String>,
+    gpu: bool,
     words: usize,
 ) -> Result<Vec<subtitles::Caption>, Failure> {
     let tools = ready_tools(&state)?;
@@ -271,7 +292,7 @@ async fn transcribe(
     let progress = move |p: i32| {
         let _ = task_app.emit("transcribe-progress", p);
     };
-    let spoken = spoken_words(&app, &tools, &vod, (start, end), language, cancel.clone(), progress).await;
+    let spoken = spoken_words(&app, &tools, &vod, (start, end), language, gpu, cancel.clone(), progress).await;
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
@@ -333,6 +354,20 @@ async fn gpu_encoders(state: &AppState, tools: &tools::Tools, codec: encode::Cod
     let list = encode::available(tools, codec).await;
     gpus.insert(codec, list.clone());
     list
+}
+
+/// `speech::gpu`, asked once.
+async fn speech_gpu(app: &AppHandle) -> Option<(i32, String)> {
+    let state = app.state::<AppState>();
+    let found = state.speech_gpu.get_or_init(|| async { tauri::async_runtime::spawn_blocking(speech::gpu).await.ok().flatten() });
+    found.await.clone()
+}
+
+/// Name of the GPU speech is recognised on, for the settings screen; `None` means
+/// the CPU.
+#[tauri::command]
+async fn speech_device(app: AppHandle) -> Option<String> {
+    speech_gpu(&app).await.map(|g| g.1)
 }
 
 /// GPU encoders that work here for `codec`, for the settings screen.
@@ -559,21 +594,34 @@ fn job_start(
         let overlay = overlay
             .filter(|_| !job.vod.local || all_messages.is_some())
             .map(|style| cut::clip_style(&style, &job.vod, options.layout.as_ref()));
-        let mut video = match options.output.encoder {
+        let video = match options.output.encoder {
             encode::Encoder::Auto => {
                 let gpus = gpu_encoders(&app.state::<AppState>(), &tools, options.output.codec).await;
                 encode::resolve(options.output, &gpus)
             }
             _ => options.output,
         };
-        let mut done = Vec::new();
-        for (index, interval) in job.intervals.iter().enumerate() {
+        // Two clips at once while a GPU encodes: the CPU has room for a second decode
+        // and filter chain (1.2-1.4x faster on two clips, measured 2026-10-21). x264
+        // already takes every core.
+        let parallel = if video.encoder == encode::Encoder::Cpu { 1 } else { 2 };
+        let video = Mutex::new(video);
+        // Whisper takes every core: one transcription at a time.
+        let speech = tokio::sync::Mutex::new(());
+        let (app, tools, job, options, overlay, all_messages) = (&app, &tools, &job, &options, &overlay, &all_messages);
+        // Paths of clips being cut: their files appear only when they are done.
+        let taken = Mutex::new(Vec::new());
+        let (cache, client, subs_dir, out_dir, template, video, speech, taken) =
+            (&cache, &client, &subs_dir, &out_dir, &template, &video, &speech, &taken);
+        // Each clip: its event, and its file and interval when it is done.
+        let clip = |index: usize| async move {
+            let interval = &job.intervals[index];
             let _ = app.emit("clip", ClipEvent::Preparing { index });
-            let chat = match &overlay {
-                Some(style) => match &all_messages {
-                    Some(Ok(all)) => Ok(Some(cut::chat_from(&cache, interval, style, all).await)),
+            let chat = match overlay {
+                Some(style) => match all_messages {
+                    Some(Ok(all)) => Ok(Some(cut::chat_from(cache, interval, style, all).await)),
                     Some(Err(e)) => Err(e.clone()),
-                    None => cut::load_chat(&client, &cache, &job.vod, interval, style).await.map(Some).map_err(|e| e.to_string()),
+                    None => cut::load_chat(client, cache, &job.vod, interval, style).await.map(Some).map_err(|e| e.to_string()),
                 },
                 None => Ok(None),
             };
@@ -581,7 +629,7 @@ fn job_start(
                 Ok(chat) => chat,
                 Err(e) => {
                     let _ = app.emit("clip", ClipEvent::Failed { index, error: log(&format!("clip {} chat", index + 1), Failure::new(Kind::Chat, e)) });
-                    continue;
+                    return None;
                 }
             };
             let chat = chat.map(|mut c| {
@@ -594,7 +642,8 @@ fn job_start(
             let subtitles = match &options.subtitles {
                 Some(style) => {
                     let language = options.language.clone();
-                    clip_subtitles(&app, &tools, &job, index, style, language, options.layout.as_ref(), &subs_dir).await.map(Some)
+                    let _one = speech.lock().await;
+                    clip_subtitles(app, tools, job, index, style, language, options.speech_gpu, options.layout.as_ref(), subs_dir).await.map(Some)
                 }
                 None => Ok(None),
             };
@@ -602,22 +651,25 @@ fn job_start(
                 Ok(subtitles) => subtitles,
                 Err(e) => {
                     let _ = app.emit("clip", ClipEvent::Failed { index, error: log(&format!("clip {} subtitles", index + 1), e) });
-                    continue;
+                    return None;
                 }
             };
-            let out = job::clip_path(&out_dir, &template, &job.vod, interval, index + 1);
+            let out = {
+                let mut taken = taken.lock().unwrap();
+                let out = job::clip_path(out_dir, template, &job.vod, interval, index + 1, &taken);
+                taken.push(out.clone());
+                out
+            };
             let progress = |fraction| {
                 let _ = app.emit("clip", ClipEvent::Running { index, fraction });
             };
             let mut attempt = 0;
-            let event = loop {
+            let (event, done) = loop {
+                let on = *video.lock().unwrap();
                 let cut_options =
-                    cut::CutOptions { video, chat: options.chat_output, layout: options.layout.clone(), subtitles: subtitles.clone() };
-                match cut::cut(&tools, &job.vod.playlist, interval, chat.clone(), cut_options, &out, progress).await {
-                    Ok(()) => {
-                        done.push((out.clone(), interval.clone()));
-                        break ClipEvent::Done { index, path: out, no_chat };
-                    }
+                    cut::CutOptions { video: on, chat: options.chat_output, layout: options.layout.clone(), subtitles: subtitles.clone() };
+                match cut::cut(tools, &job.vod.playlist, interval, chat.clone(), cut_options, &out, progress).await {
+                    Ok(()) => break (ClipEvent::Done { index, path: out.clone(), no_chat }, Some((out, interval.clone()))),
                     Err(e) if e.kind() == Kind::Network && attempt < RETRY_DELAYS.len() => {
                         errlog::write(&format!("clip {} retry {}", index + 1, attempt + 1), &e.to_string());
                         let _ = app.emit("clip", ClipEvent::Retrying { index, attempt: attempt + 1 });
@@ -626,13 +678,13 @@ fn job_start(
                     }
                     // A GPU encoder can fail on a driver or a frame format; the CPU
                     // always works, so the rest of the job goes there too.
-                    Err(e) if video.encoder != encode::Encoder::Cpu && e.kind() != Kind::DiskFull => {
-                        errlog::write(&format!("clip {} on {:?}, now on the CPU", index + 1, video.encoder), &e.to_string());
-                        video = video.on_cpu();
+                    Err(e) if on.encoder != encode::Encoder::Cpu && e.kind() != Kind::DiskFull => {
+                        errlog::write(&format!("clip {} on {:?}, now on the CPU", index + 1, on.encoder), &e.to_string());
+                        *video.lock().unwrap() = on.on_cpu();
                     }
                     Err(e) => {
                         let error = log(&format!("clip {}", index + 1), Failure::new(e.kind(), e));
-                        break ClipEvent::Failed { index, error };
+                        break (ClipEvent::Failed { index, error }, None);
                     }
                 }
             };
@@ -640,12 +692,16 @@ fn job_start(
                 let _ = std::fs::remove_file(file);
             }
             let _ = app.emit("clip", event);
-        }
+            done
+        };
+        // In job order, for joining.
+        let done: Vec<(PathBuf, job::Interval)> =
+            stream::iter(0..job.intervals.len()).map(clip).buffered(parallel).filter_map(std::future::ready).collect().await;
         if options.merge && done.len() >= 2 {
             let _ = app.emit("merge", MergeEvent::Running);
             let (clips, intervals): (Vec<PathBuf>, Vec<job::Interval>) = done.into_iter().unzip();
-            let out = job::merged_path(&out_dir, &template, &job.vod, &intervals);
-            let event = match cut::concat(&tools, &clips, &out).await {
+            let out = job::merged_path(out_dir, template, &job.vod, &intervals);
+            let event = match cut::concat(tools, &clips, &out).await {
                 Ok(()) => MergeEvent::Done { path: out },
                 Err(e) => MergeEvent::Failed { error: log("merge", Failure::new(e.kind(), e)) },
             };
@@ -757,6 +813,7 @@ pub fn run() {
             update_restart,
             speech_model_ready,
             speech_model_install,
+            speech_device,
             transcribe
         ])
         .run(tauri::generate_context!())
