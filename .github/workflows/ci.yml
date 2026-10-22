@@ -33,6 +33,9 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    # A short target path: MSBuild's file tracker fails on whisper.cpp's nested Vulkan shader build above 260 characters.
+    env:
+      CARGO_TARGET_DIR: D:\t
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

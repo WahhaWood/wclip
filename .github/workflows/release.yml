@@ -34,6 +34,9 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    # Short target path, see ci.yml.
+    env:
+      CARGO_TARGET_DIR: D:\t
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -45,7 +48,7 @@ jobs:
       - run: npm ci
       # Portable exe only: the installers are not shipped.
       - run: npm run tauri build -- --no-bundle
-      - run: copy src-tauri\target\release\wclip.exe WClip-windows-x64.exe
+      - run: copy D:\t\release\wclip.exe WClip-windows-x64.exe
       - uses: actions/upload-artifact@v7
         with: { name: windows, path: WClip-windows-x64.exe }
 
