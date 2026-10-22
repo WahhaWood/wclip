@@ -48,6 +48,8 @@ pub struct Settings {
     pub speech_language: Option<String>,
     /// Recognise the speech on the GPU when there is one.
     pub speech_gpu: bool,
+    /// Notify by the system when a job ends.
+    pub notify: bool,
     /// Videos opened last, newest first (see `Recent`).
     pub recent: Vec<Recent>,
 }
@@ -93,6 +95,7 @@ impl Default for Settings {
             subtitle_style: SubtitleStyle::default(),
             speech_language: None,
             speech_gpu: true,
+            notify: true,
             recent: Vec::new(),
         }
     }

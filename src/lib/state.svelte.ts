@@ -183,6 +183,7 @@ export async function runJob(items: number[], overlay: OverlayStyle | null, merg
     subtitles: s.subtitles ? $state.snapshot(s.subtitleStyle) : null,
     language: s.speechLanguage,
     speechGpu: s.speechGpu,
+    notify: s.notify,
   };
   for (const i of items) app.queue[i].status = { state: "waiting" };
   app.jobItems = items;

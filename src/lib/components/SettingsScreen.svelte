@@ -551,6 +551,11 @@
           этом компьютере, никому его не передавайте. После выхода из аккаунта в браузере он перестаёт работать.
         </p>
       </div>
+      <span>Уведомление</span>
+      <label class="check">
+        <input type="checkbox" bind:checked={s.notify} />
+        Сообщить, когда задание закончится
+      </label>
       <span>Обновления</span>
       <div>
         <button class="btn" disabled={checking} onclick={checkUpdate}>

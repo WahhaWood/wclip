@@ -139,6 +139,8 @@ export type Settings = {
   speechLanguage: string | null;
   /** Recognise the speech on the GPU when there is one. */
   speechGpu: boolean;
+  /** Notify by the system when a job ends. */
+  notify: boolean;
   /** Videos opened last, newest first. */
   recent: Recent[];
 };

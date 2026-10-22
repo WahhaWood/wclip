@@ -114,6 +114,8 @@ struct JobOptions {
     language: Option<String>,
     /// Recognise the speech on the GPU when there is one.
     speech_gpu: bool,
+    /// Tell by a system notification when the job ends.
+    notify: bool,
 }
 
 /// Chat of a whole video: for finding moments, and cut from without loading again.
@@ -721,6 +723,7 @@ fn job_start(
         // In job order, for joining.
         let done: Vec<(PathBuf, job::Interval)> =
             stream::iter(0..job.intervals.len()).map(clip).buffered(parallel).filter_map(std::future::ready).collect().await;
+        let cut_count = done.len();
         if options.merge && done.len() >= 2 {
             let _ = app.emit("merge", MergeEvent::Running);
             let (clips, intervals): (Vec<PathBuf>, Vec<job::Interval>) = done.into_iter().unzip();
@@ -730,6 +733,11 @@ fn job_start(
                 Err(e) => MergeEvent::Failed { error: log("merge", Failure::new(e.kind(), e)) },
             };
             let _ = app.emit("merge", event);
+        }
+        if options.notify {
+            use tauri_plugin_notification::NotificationExt;
+            let body = format!("Готово роликов: {} из {}", cut_count, job.intervals.len());
+            let _ = app.notification().builder().title("WClip").body(body).show();
         }
         let _ = app.emit("job-done", ());
     }));
@@ -807,6 +815,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState::default())
         .setup(|app| {
             errlog::init(app.path().app_log_dir()?.join("wclip.log"));
