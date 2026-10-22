@@ -100,6 +100,14 @@ impl Job {
             .filter_map(|(i, iv)| iv.check(self.vod.duration).err().map(|e| (i, e)))
             .collect()
     }
+
+    /// Upper estimate of the output size, bytes: 16 Mbit/s is above what 1080p60 at
+    /// high quality takes; joining the clips writes their length once more.
+    pub fn disk_needed(&self, merge: bool) -> u64 {
+        const BYTES_PER_SECOND: f64 = 2_000_000.0;
+        let seconds: f64 = self.intervals.iter().map(|iv| (iv.end - iv.start).max(0.0)).sum();
+        (seconds * BYTES_PER_SECOND) as u64 * if merge && self.intervals.len() >= 2 { 2 } else { 1 }
+    }
 }
 
 /// File name template used when an interval has no name of its own.
@@ -185,6 +193,15 @@ pub fn parse_vod_id(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_estimate() {
+        let iv = |start, end| Interval { start, end, name: String::new() };
+        let vod = Vod { id: "1".into(), title: String::new(), channel: String::new(), duration: 100.0, thumbnail: None, playlist: String::new(), height: None, audio: None, local: false, started: None };
+        let job = Job { vod, intervals: vec![iv(0.0, 10.0), iv(20.0, 30.0)], chat_log: None, captions: vec![] };
+        assert_eq!(job.disk_needed(false), 40_000_000);
+        assert_eq!(job.disk_needed(true), 80_000_000);
+    }
 
     #[test]
     fn vod_id_forms() {

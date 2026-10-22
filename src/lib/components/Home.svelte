@@ -5,7 +5,7 @@
   import { api, type Caption, type Interval } from "$lib/api";
   import { explain } from "$lib/errors";
   import { copyLayout } from "$lib/layouts";
-  import { app, newRow, runJob, type Row } from "$lib/state.svelte";
+  import { app, discardSession, newRow, rememberVod, resumeSession, runJob, type Row } from "$lib/state.svelte";
   import { formatClock, formatTime, parseClock, parseIntervalList, parseTime } from "$lib/time";
   import Captions from "./Captions.svelte";
   import Frame from "./Frame.svelte";
@@ -82,12 +82,32 @@
     return () => unlisten.then((f) => f());
   });
 
+  async function resume() {
+    if (!app.session) return;
+    loading = true;
+    error = null;
+    try {
+      await resumeSession(app.session);
+      link = "";
+    } catch (e) {
+      error = explain(e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  function openRecent(id: string) {
+    link = id;
+    return openVod();
+  }
+
   async function openVod() {
     if (!link.trim()) return;
     loading = true;
     error = null;
     try {
       app.vod = await api.vodInfo(link);
+      rememberVod(app.vod);
       app.chatLog = null;
       pickChannelLayout(app.vod.channel);
       if (app.rows.length === 0) app.rows = [newRow()];
@@ -116,6 +136,7 @@
     error = null;
     try {
       app.vod = await api.localVideo(path);
+      rememberVod(app.vod);
       app.chatLog = null;
       link = "";
       if (app.rows.every((r) => !r.start.trim() && !r.end.trim())) {
@@ -225,6 +246,27 @@
     <p class="dim hint">Ссылка на запись Twitch или видеофайл с диска, его можно перетащить в окно вместе с логом чата.</p>
     {#if error}
       <p class="error" title={error.detail}>{error.text}</p>
+    {/if}
+    {#if app.session && !app.vod}
+      <div class="card session">
+        <span>
+          Прошлая работа не закончена: <bdi>{app.session.input}</bdi>, интервалов {app.session.rows.length}.
+        </span>
+        <button class="btn small primary" disabled={loading} onclick={resume}>Продолжить</button>
+        <button class="btn small" disabled={loading} onclick={discardSession}>Начать заново</button>
+      </div>
+    {/if}
+
+    {#if !app.vod && !app.session && app.settings?.recent.length}
+      <div class="recent">
+        <span class="dim">Недавние</span>
+        {#each app.settings?.recent ?? [] as r (r.input)}
+          <button class="btn recent-item" disabled={loading} onclick={() => (r.local ? openLocal(r.input) : openRecent(r.input))}>
+            <span class="title">{r.title || baseName(r.input)}</span>
+            <span class="dim">{r.local ? "Файл с диска" : r.channel} · {new Date(r.opened).toLocaleDateString("ru-RU")}</span>
+          </button>
+        {/each}
+      </div>
     {/if}
 
     {#if app.vod}
@@ -427,6 +469,43 @@
 
   .hint {
     font-size: 13px;
+  }
+
+  .session {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .recent {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .recent-item {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    text-align: left;
+  }
+
+  .recent-item .title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-item .dim {
+    flex: none;
+  }
+
+  .session span {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .chatlog,

@@ -10,6 +10,7 @@ import {
   type Interval,
   type MergeEvent,
   type OverlayStyle,
+  type Session,
   type Settings,
   type UpdateInfo,
   type UpdateProgress,
@@ -63,6 +64,8 @@ export const app = $state({
   /** Chat log picked for a local video. */
   chatLog: null as { path: string; info: ChatLogInfo } | null,
   rows: [] as Row[],
+  /** Work of the last run, offered on the home screen until the user picks or starts anew. */
+  session: null as Session | null,
   /** `key` (see `chatKey`) of the video the chat is for. */
   chat: { key: null as string | null, status: { state: "idle" } as ChatState },
   /** VOD of the queue: the home screen may already show another one. */
@@ -93,6 +96,59 @@ export function addInterval(start: number, end: number, name = "") {
 export function chatKey(vod: Vod, log: ChatLogRef | null): string | null {
   if (!vod.local) return `vod:${vod.id}`;
   return log ? `log:${log.path}@${log.start}` : null;
+}
+
+/** The work to keep between runs; `null` while there is nothing worth keeping. */
+export function currentSession(): Session | null {
+  const vod = app.vod;
+  const rows = app.rows.filter((r) => r.start.trim() || r.end.trim() || r.name.trim());
+  if (!vod || rows.length === 0) return null;
+  return {
+    input: vod.local ? vod.playlist : vod.id,
+    local: vod.local,
+    chatLog: app.chatLog?.path ?? null,
+    rows: rows.map(({ start, end, name, captions, captionsFor }) => $state.snapshot({ start, end, name, captions, captionsFor })),
+  };
+}
+
+let sessionTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Keeps the current work a moment after the last change; an old session waits for the user's choice. */
+export function saveSession() {
+  clearTimeout(sessionTimer);
+  sessionTimer = setTimeout(() => {
+    const session = currentSession();
+    if (session) api.sessionSave(session).catch(console.error);
+  }, 800);
+}
+
+/** Opens the video of the saved session and puts its rows back; rejects like `vodInfo`. */
+export async function resumeSession(session: Session) {
+  app.session = null;
+  app.vod = session.local ? await api.localVideo(session.input) : await api.vodInfo(session.input);
+  rememberVod(app.vod);
+  app.chatLog = null;
+  app.rows = session.rows.map((r) => ({ ...newRow(r.start, r.end, r.name), captions: r.captions, captionsFor: r.captionsFor }));
+  if (session.chatLog) {
+    const path = session.chatLog;
+    app.chatLog = { path, info: await api.chatLogOpen(path) };
+  }
+}
+
+export function discardSession() {
+  app.session = null;
+  api.sessionClear().catch(console.error);
+}
+
+const RECENT_KEPT = 10;
+
+/** Puts the opened video first in the list of recent ones. */
+export function rememberVod(vod: Vod) {
+  const s = app.settings;
+  if (!s) return;
+  const input = vod.local ? vod.playlist : vod.id;
+  const entry = { input, local: vod.local, title: vod.title, channel: vod.channel, opened: Date.now() };
+  s.recent = [entry, ...s.recent.filter((r) => r.input !== input)].slice(0, RECENT_KEPT);
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -137,6 +193,7 @@ export async function runJob(items: number[], overlay: OverlayStyle | null, merg
 /** Loads settings and starts listening to job events; call once on start. */
 export async function initApp() {
   app.settings = await api.settingsLoad();
+  app.session = await api.sessionLoad().catch(() => null);
   await listen<ClipEvent>("clip", ({ payload: e }) => {
     const item = app.queue[app.jobItems[e.index]];
     if (!item) return;

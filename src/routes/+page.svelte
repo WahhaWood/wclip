@@ -7,7 +7,7 @@
   import SettingsScreen from "$lib/components/SettingsScreen.svelte";
   import ToolsSetup from "$lib/components/ToolsSetup.svelte";
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
-  import { app, initApp, saveSettings, type Screen } from "$lib/state.svelte";
+  import { app, initApp, saveSession, saveSettings, type Screen } from "$lib/state.svelte";
 
   let tools = $state<ToolInfo[] | null>(null);
   let toolsReady = $state(false);
@@ -28,6 +28,12 @@
     JSON.stringify(app.settings);
     if (loaded) saveSettings();
     loaded = app.settings !== null;
+  });
+
+  // The work in progress is kept too (rows, video, chat log).
+  $effect(() => {
+    JSON.stringify([app.vod?.id, app.chatLog?.path, app.rows]);
+    if (app.vod) saveSession();
   });
 
   const tabs = $derived<[Screen, string][]>([

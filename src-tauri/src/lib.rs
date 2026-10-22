@@ -8,6 +8,7 @@ pub mod job;
 pub mod layout;
 pub mod moments;
 pub mod overlay;
+pub mod session;
 pub mod settings;
 pub mod speech;
 pub mod subtitles;
@@ -313,6 +314,10 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app.path().app_config_dir().map_err(|e| e.to_string())?.join("settings.json"))
 }
 
+fn session_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_config_dir().map_err(|e| e.to_string())?.join("session.json"))
+}
+
 /// `<Videos>/WClip`. Without an XDG videos dir (common on Linux) it falls back to
 /// Downloads, then `~/Videos`.
 fn default_out_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -434,6 +439,22 @@ fn settings_load(app: AppHandle) -> Result<settings::Settings, String> {
 #[tauri::command]
 fn settings_save(app: AppHandle, settings: settings::Settings) -> Result<(), String> {
     settings::save(&settings_path(&app)?, &settings).map_err(|e| e.to_string())
+}
+
+/// The unfinished work of the last run, as the UI saved it (see `session::save`).
+#[tauri::command]
+fn session_load(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    Ok(session::load(&session_path(&app)?))
+}
+
+#[tauri::command]
+fn session_save(app: AppHandle, session: serde_json::Value) -> Result<(), String> {
+    session::save(&session_path(&app)?, &session).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_clear(app: AppHandle) -> Result<(), String> {
+    session::clear(&session_path(&app)?).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -559,6 +580,10 @@ fn job_start(
     };
     let template = name_template.unwrap_or_default();
     std::fs::create_dir_all(&out_dir).map_err(|e| log("out dir", e.into()))?;
+    let (needed, free) = (job.disk_needed(options.merge), fs4::available_space(&out_dir).unwrap_or(u64::MAX));
+    if free < needed {
+        return Err(log("disk space", Failure::new(Kind::DiskFull, format!("need about {} MB, {} MB free", needed >> 20, free >> 20))));
+    }
     let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("images");
     let subs_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("subs");
     // Without a timeout a request on a dropped connection can hang forever.
@@ -654,6 +679,8 @@ fn job_start(
                     return None;
                 }
             };
+            // Also removed when the job is cancelled mid-clip.
+            let _subtitles_file = subtitles.clone().map(cut::PartFile);
             let out = {
                 let mut taken = taken.lock().unwrap();
                 let out = job::clip_path(out_dir, template, &job.vod, interval, index + 1, &taken);
@@ -688,9 +715,6 @@ fn job_start(
                     }
                 }
             };
-            if let Some(file) = &subtitles {
-                let _ = std::fs::remove_file(file);
-            }
             let _ = app.emit("clip", event);
             done
         };
@@ -802,6 +826,9 @@ pub fn run() {
             encoders,
             settings_load,
             settings_save,
+            session_load,
+            session_save,
+            session_clear,
             font_families,
             preview_frame,
             overlay_panel,

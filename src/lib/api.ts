@@ -139,7 +139,12 @@ export type Settings = {
   speechLanguage: string | null;
   /** Recognise the speech on the GPU when there is one. */
   speechGpu: boolean;
+  /** Videos opened last, newest first. */
+  recent: Recent[];
 };
+
+/** A video opened before: `input` is what `vodInfo` or `localVideo` takes. */
+export type Recent = { input: string; local: boolean; title: string; channel: string; opened: number };
 
 /** A release newer than the running app; `installable` false means linking to `page`. */
 export type UpdateInfo = { version: string; notes: string; page: string; installable: boolean };
@@ -159,6 +164,14 @@ export type ClipEvent =
 
 export type MergeEvent = { state: "running" } | { state: "done"; path: string } | { state: "failed"; error: Failure };
 
+/** Unfinished work kept between runs: the video as `vodInfo`/`localVideo` take it, and the typed rows. */
+export type Session = {
+  input: string;
+  local: boolean;
+  chatLog: string | null;
+  rows: { start: string; end: string; name: string; captions: Caption[] | null; captionsFor: string | null }[];
+};
+
 export const api = {
   toolsStatus: () => invoke<ToolInfo[]>("tools_status"),
   toolsInstall: () => invoke<ToolInfo[]>("tools_install"),
@@ -170,6 +183,9 @@ export const api = {
   chatActivity: (query: string) => invoke<Activity>("chat_activity", { query }),
   settingsLoad: () => invoke<Settings>("settings_load"),
   settingsSave: (settings: Settings) => invoke<void>("settings_save", { settings }),
+  sessionLoad: () => invoke<Session | null>("session_load"),
+  sessionSave: (session: Session) => invoke<void>("session_save", { session }),
+  sessionClear: () => invoke<void>("session_clear"),
   fontFamilies: () => invoke<string[]>("font_families"),
   previewFrame: (playlist: string, time: number) => invoke<ArrayBuffer>("preview_frame", { playlist, time }),
   overlayPanel: (style: OverlayStyle) => invoke<ArrayBuffer>("overlay_panel", { style }),

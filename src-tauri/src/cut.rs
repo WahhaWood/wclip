@@ -486,7 +486,7 @@ pub async fn concat(tools: &Tools, clips: &[PathBuf], out: &Path) -> Result<()> 
 }
 
 /// Removed on drop unless renamed away first.
-struct PartFile(PathBuf);
+pub(crate) struct PartFile(pub(crate) PathBuf);
 
 impl Drop for PartFile {
     fn drop(&mut self) {

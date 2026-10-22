@@ -48,6 +48,20 @@ pub struct Settings {
     pub speech_language: Option<String>,
     /// Recognise the speech on the GPU when there is one.
     pub speech_gpu: bool,
+    /// Videos opened last, newest first (see `Recent`).
+    pub recent: Vec<Recent>,
+}
+
+/// A video opened before: `input` is what `vod_info` or `local_video` takes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Recent {
+    pub input: String,
+    pub local: bool,
+    pub title: String,
+    pub channel: String,
+    /// Unix milliseconds of the last opening.
+    pub opened: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +93,7 @@ impl Default for Settings {
             subtitle_style: SubtitleStyle::default(),
             speech_language: None,
             speech_gpu: true,
+            recent: Vec::new(),
         }
     }
 }
