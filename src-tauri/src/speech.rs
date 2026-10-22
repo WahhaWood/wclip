@@ -214,4 +214,16 @@ mod tests {
         assert!(words.len() > 20);
         assert!(words.windows(2).all(|w| w[0].start <= w[1].start && w[0].end <= w[1].start + 1e-9));
     }
+
+    /// A GPU number that does not exist must come back as an error (which `spoken_words`
+    /// retries on the CPU), not abort the process:
+    /// `WCLIP_MODEL=<file> cargo test --release -- --ignored smoke_missing_gpu --nocapture`.
+    #[test]
+    #[ignore]
+    fn smoke_missing_gpu() {
+        let path = std::path::PathBuf::from(std::env::var("WCLIP_MODEL").expect("WCLIP_MODEL"));
+        let samples = vec![0.0f32; 16000 * 5];
+        let result = transcribe(&path, &samples, Some("en"), Some(99), |_| {}, Arc::new(AtomicBool::new(false)));
+        println!("device 99: {:?}", result.as_ref().map(|w| w.len()));
+    }
 }
