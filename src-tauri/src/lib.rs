@@ -15,6 +15,8 @@ pub mod subtitles;
 pub mod tools;
 pub mod twitch;
 pub mod updater;
+#[cfg(all(windows, target_env = "msvc"))]
+mod vulkan_loader;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -432,6 +434,7 @@ async fn chat_log_open(path: PathBuf) -> Result<chat::log::ChatLogInfo, Failure>
 #[tauri::command]
 fn settings_load(app: AppHandle) -> Result<settings::Settings, String> {
     let mut s = settings::load(&settings_path(&app)?);
+    errlog::set_secret(s.twitch_token.as_deref());
     if s.out_dir.is_none() {
         s.out_dir = Some(default_out_dir(&app)?);
     }
@@ -440,6 +443,7 @@ fn settings_load(app: AppHandle) -> Result<settings::Settings, String> {
 
 #[tauri::command]
 fn settings_save(app: AppHandle, settings: settings::Settings) -> Result<(), String> {
+    errlog::set_secret(settings.twitch_token.as_deref());
     settings::save(&settings_path(&app)?, &settings).map_err(|e| e.to_string())
 }
 

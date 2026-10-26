@@ -147,6 +147,13 @@ fn spoken_end(start: f64, next: Option<f64>, chars: usize) -> f64 {
 mod tests {
     use super::*;
 
+    /// Without a Vulkan loader or driver (the Windows CI runner) listing GPUs must
+    /// return, not crash: whisper then runs on the CPU.
+    #[test]
+    fn gpu_listing_returns() {
+        let _ = gpu();
+    }
+
     fn token(text: &[u8], start: i64) -> Token {
         Token { bytes: text.to_vec(), start }
     }

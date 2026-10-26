@@ -12,6 +12,8 @@ const MAX_SIZE: u64 = 512 * 1024;
 
 static PATH: OnceLock<PathBuf> = OnceLock::new();
 static LOCK: Mutex<()> = Mutex::new(());
+/// The Twitch token from the settings: never written to the log, whatever the message holds.
+static SECRET: Mutex<Option<String>> = Mutex::new(None);
 /// The first line of each run says which build wrote it.
 static HEADER_WRITTEN: AtomicBool = AtomicBool::new(false);
 
@@ -32,11 +34,17 @@ pub fn path() -> Option<&'static Path> {
     PATH.get().map(PathBuf::as_path).filter(|p| p.exists())
 }
 
+pub fn set_secret(secret: Option<&str>) {
+    *SECRET.lock().unwrap_or_else(|e| e.into_inner()) = secret.map(str::to_owned);
+}
+
 pub fn write(context: &str, message: &str) {
     let Some(path) = PATH.get() else { return };
     // A panic while holding the lock poisons it; logging must go on.
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = append(path, &format!("{} {context}: {}\n", timestamp(), redact(message)));
+    let secret = SECRET.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let message = scrub(&redact(message), &[secret.as_deref().unwrap_or("")]);
+    let _ = append(path, &format!("{} {context}: {message}\n", timestamp()));
 }
 
 fn append(path: &Path, line: &str) -> std::io::Result<()> {
@@ -129,6 +137,20 @@ mod tests {
     fn scrubs_secrets() {
         assert_eq!(scrub("a tok123 b tok123", &["tok123"]), "a … b …");
         assert_eq!(scrub("keep", &["", "  "]), "keep");
+    }
+
+    #[test]
+    fn token_stays_out_of_the_log() {
+        let dir = std::env::temp_dir().join(format!("wclip-log-secret-{}", std::process::id()));
+        let path = dir.join("wclip.log");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = PATH.set(path.clone());
+        let Some(path) = PATH.get().cloned() else { return };
+        set_secret(Some("secrettoken123"));
+        write("vod", "yt-dlp failed with cookie secrettoken123 here");
+        set_secret(None);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("yt-dlp failed") && !text.contains("secrettoken123"), "{text}");
     }
 
     #[test]
